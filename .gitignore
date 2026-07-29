@@ -1,0 +1,18 @@
+# Environment variables (contains secrets — never commit)
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Generated output (added when the report writer exists — not source)
+output/
+
+# OS cruft
+.DS_Store
+Thumbs.db
