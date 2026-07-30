@@ -12,7 +12,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-flash-latest"
 MOCK_USER_AGENT = "marketradar-mock-mode (no real Reddit credentials configured)"
 
 
