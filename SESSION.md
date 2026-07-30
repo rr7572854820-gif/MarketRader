@@ -47,6 +47,65 @@ Ideas worth considering later, explicitly not committed to now.
 
 ## Session Log
 
+## Session — 2026-07-30 (Task 4: Verification Engine)
+
+### Current Objective
+Build a dedicated, independent verification module (`src/verification/`) that re-checks every claim in a `DiscussionInsight` against its original source discussion, produces a per-field verification report, and demos as the last stage of the pipeline: Fetch → Analyze → Cluster → Verify → Print. Not a roadmap continuation — stop before Task 5.
+
+### Completed Work
+- **Designed the verification module to make zero AI calls, deliberately.** `Extractor` (Task 3) already does inline, lightweight quote verification before constructing a `DiscussionInsight` — this task explicitly asked for something "completely independent from extraction." Considered whether independence should mean re-verifying with a second AI call, and concluded no: checking an AI's claim against real, immutable source text is a meaningful anti-hallucination signal; checking it with a second AI call just risks one model rubber-stamping the other's mistake, and this project has now hit the real Gemini daily quota twice in one day of testing (Task 3.1), which a zero-AI verifier is immune to entirely.
+- Built `src/verification/models.py`: `VerificationStatus` (Verified/Partial/Unverified — new, since it answers a different question than the existing `ConfidenceLevel`), `FieldVerification` (one claim's result: status, confidence, supporting quotes, source discussion IDs), `InsightVerificationResult` (one insight's full set of field checks, plus a worst-case `overall_status` rollup — deliberately pessimistic: one Unverified field makes the whole insight's status Unverified, not averaged away), `VerificationReport` (aggregate counts + `verification_rate`, defined strictly as `verified / total` with Partial claims **not** counted toward the rate, to avoid inflating it).
+- Built `src/verification/verifier.py` (`Verifier` class). Designed two honestly different verification ceilings for two honestly different kinds of claims:
+  - **Quote-bearing claims** (primary/secondary pain points, supporting evidence, buying signals) — already guaranteed by `Extractor` to be verbatim substrings of their source. Re-confirms this independently via exact substring match; can reach **Verified**. This is real defense-in-depth: it would catch a regression in `Extractor`'s own check, or an insight being verified against the wrong post.
+  - **Speculative claims with no attached quote at all** (`user_persona`, `feature_requests` — see `src/insights/models.py`, these were never evidence claims) — checked via a deterministic keyword-overlap heuristic against the source text; can reach at most **Partial** (some textual grounding found), **never Verified** — there is no verbatim quote to confirm, so claiming Verified status for these would itself be a form of overclaiming confidence.
+  - Added `VerificationError`, raised if `Verifier.verify()` is ever called with a `DiscussionInsight` whose `source_post_id` doesn't match the given `FetchedPost.id` — verifying a claim against the wrong source could make a hallucination look "confirmed" by textual coincidence, which is worse than not verifying at all.
+  - `verify_all(insights, posts)` matches insights to posts by ID and **never silently drops** an insight whose source post isn't in the given list — every field is explicitly reported Unverified with that reason instead, per requirement 5's "never silently discard failures."
+- **Chose pytest as the project's test framework** — the first real test suite in this project (previously flagged as an open decision in TODO.md). Chosen over stdlib `unittest` for plain-assert syntax and clearer failure output, consistent with this project's "easy iteration/debugging" architecture goal; no heavy transitive dependencies. Added to `requirements.txt`, installed into `.venv`.
+- Wrote `tests/test_verifier.py` — 11 tests covering the failure modes requirement 9 named directly: exact quote match (Verified), quote not in source (Unverified, never fabricated), empty/missing claims, persona/feature-request keyword support (Partial) vs. none (Unverified), verifying against the wrong source (raises), a missing source post never silently dropping the insight, the worst-case `overall_status` rollup, and report-level count/rate aggregation across multiple insights. All pass, all offline, zero API cost — caught one real bug in the test itself (a miscounted expected total) before it ever touched real data.
+- Extended `src/analyze_preview.py` (Task 3's demo) rather than creating a new script, per requirement 8's framing of the whole pipeline as one flow: added a `Verify` step after clustering (`Verifier().verify_all(insights, posts)`) and a `_print_verification_summary()` that shows total/Verified/Partial/Unverified counts, the overall rate, and a flagged list of every non-Verified claim (empty fields omitted) for human review.
+- **Ran the extended demo for real** (mock Reddit data, real Gemini via `gemini-flash-lite-latest` — the default model's daily quota was still exhausted from Task 3.1's testing) and it worked correctly end to end: 3 discussions → correctly merged into 1 cluster (all three genuinely are the same reconciliation pain point) → 17 total claims verified → 12 Verified (70.6%), 3 Partial (17.6%), 2 Unverified (11.8%).
+- **Investigated the two Unverified personas directly rather than assuming the heuristic was simply "too strict."** Found the precise mechanism: claim "Agency owner managing multi-processor payment payouts" vs. source "...it's payouts across three different processors..." — keyword overlap computed at 2/7 = 0.286, against a 0.3 threshold, entirely because "processor" (claim) and "processors" (source) are different tokens under exact-string keyword matching with no stemming. A real, narrow, mechanically-understood limitation — reported honestly rather than silently patched with an unmeasured quick fix (same discipline as Task 3.1's clustering gap).
+
+### In Progress
+None. Task 4 is complete: module built, independent from extraction, tested, demoed end-to-end with real data, documented. Did not begin Task 5.
+
+### Known Issues
+- **Exact-token keyword matching has no stemming**, causing near-miss false negatives on simple word-form differences (singular/plural, verb tense) — demonstrated precisely above (0.286 vs 0.3 threshold, entirely due to "processor"/"processors"). Not fixed this session; a naive trailing-"s" stripper was considered and deliberately not added without measurement, to avoid introducing new false positives (e.g. on short words) without evidence it actually helps more than it hurts.
+- The Gemini free-tier daily quota for the default model (`gemini-flash-latest`) is still exhausted as of this session — `gemini-flash-lite-latest` was used again as a testing-only override, project default unchanged.
+- Feature requests extracted by `Extractor` are sometimes degenerate (e.g. the single word "automatically" as a whole "feature request" in this session's test run) — an `Extractor`/prompt quality issue from Task 3, not something Task 4 fixes, but it surfaced while reviewing verification output and is worth noting for whoever revisits the extraction prompt.
+- "Claims needing review" in the demo's printed summary is unbounded — fine at this dataset's scale (7 items, ~17-40 claims), would need pagination/truncation at real scale.
+- All Known Issues from the Task 3 and Task 3.1 entries below still apply except what this session directly addressed.
+
+### Next Tasks
+- Do not begin Task 5 — explicitly out of scope per this session's instruction.
+- If the stemming gap turns out to matter in real use: the cheapest next step is a minimal, conservative pluralization normalizer (strip trailing "s" only on words above a length threshold), measured against real verification output before being trusted, not assumed to be strictly better.
+- When quota resets: re-run this same demo against the real default model to confirm the verification numbers hold outside the lite-model substitution.
+- Consider whether `tests/` needs a `conftest.py` or package structure as it grows — currently a single flat file, fine at this size.
+
+### Important Decisions
+- **Verification makes zero AI calls, by design, not by omission.** This is the single most important architectural choice in this task: an AI-based "verifier" would be checking one model's output using another model's judgment, with no independent ground truth — deterministic text matching against the actual source is what makes verification meaningful here. Also immune to the quota problems that disrupted Task 3.1's testing.
+- Gave quote-bearing and non-quote-bearing claims genuinely different verification ceilings (Verified vs. Partial-at-best) rather than forcing every field through the same check — this is more honest than either pretending personas can be "verified" like a quote, or refusing to assess them at all.
+- Chose a deliberately pessimistic `overall_status` rollup (worst-case, not majority or average) — a report that averaged away a single Unverified claim among nine Verified ones would undersell exactly the kind of risk this module exists to surface.
+- Chose pytest over unittest now that a real testing need existed, rather than deferring the framework decision again — this was flagged as open in TODO.md since Task 2 and this was the first task where "add tests" was an explicit requirement, not just a someday-item.
+- Extended the existing `analyze_preview.py` rather than creating a new demo script — the task explicitly frames Fetch→Analyze→Cluster→Verify as one pipeline, and the project has consistently built each task's demo as an extension of the previous one rather than proliferating scripts.
+- Investigated the two Unverified personas to a precise, quantified cause before writing them up, rather than reporting "the heuristic missed these" — same discipline applied in Task 3.1 to the clustering gap, and it turned a vague weakness into a specific, actionable one (a stemming gap with an exact numeric near-miss), which is far more useful to a future session than an impression would be.
+
+### Questions
+- Is the stemming/pluralization gap worth fixing now, or is it acceptable as a known, narrow limitation for a personal tool at this scale? Leaning toward "acceptable for now, fix if it recurs on real data" — not a unilateral decision, see the architecture review's recommendation.
+- Should `Extractor`'s prompt (Task 3) be revisited to stop producing degenerate one-word "feature requests"? Out of scope for this task, flagged for whoever next touches `src/insights/prompts.py`.
+
+### Lessons Learned
+- **Don't guess why a heuristic result looks wrong — measure it.** "The persona verification seems too strict" would have been a much weaker finding than "processor vs. processors missed a 0.3 threshold by 0.014" — the second is immediately actionable (or immediately dismissible as not worth fixing); the first just invites unfocused tinkering.
+- Building the test suite alongside the module (not after) caught a bug in the *test* itself (a miscounted total) rather than a bug in the code — a reminder that test correctness needs the same scrutiny as production code correctness, especially the arithmetic in assertions.
+- The "two ceilings for two kinds of claims" design only became obvious by re-reading the existing `DiscussionInsight` model closely (persona/feature_requests genuinely have no evidence_quote field) rather than assuming every field could be verified the same way — worth re-reading existing types carefully before designing something that consumes them.
+
+### Future Improvements
+- A minimal, measured stemming pass for the keyword-overlap heuristic (see Next Tasks) — explicitly not built without evidence it helps.
+- If verification ever needs to run against much larger discussion volumes, the "claims needing review" report will need pagination or filtering (e.g. by confidence, by field type) rather than printing every flagged claim.
+- Consider whether `VerificationReport` should support filtering/exporting (e.g. "show me only Unverified primary pain points") once there's an actual downstream consumer (the Report Writer, not yet built) that would use it.
+
+---
+
 ## Session — 2026-07-30 (Task 3.1: Fix Opportunity Clustering)
 
 *Split into its own entry rather than appended to the (already very large) main 2026-07-30 entry below — see that entry's own Future Improvements note.*

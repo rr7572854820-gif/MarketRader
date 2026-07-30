@@ -1,12 +1,14 @@
-"""Task 3 demo: Fetch -> Analyze -> Print formatted business insights.
+"""Task 3 + Task 4 demo: Fetch -> Analyze -> Cluster -> Verify -> Print.
 
 Run from the project root:
     python -m src.analyze_preview COMMUNITY [--keyword X] [--limit N]
 
-Uses the same Fetcher (src/fetchers/) and AIProvider (src/ai/)
-abstractions as the rest of the project — works identically against
-mock or real Reddit data, and against Gemini or any future AI provider,
-with no changes to this file.
+Uses the same Fetcher (src/fetchers/), AIProvider (src/ai/), and
+Verifier (src/verification/) abstractions as the rest of the project —
+works identically against mock or real Reddit data, and against Gemini
+or any future AI provider, with no changes to this file. Verification
+makes zero AI calls, so it runs the same whether or not a real
+AIProvider is configured.
 
 Every opportunity_score, urgency_score, user_persona, and
 startup_opportunity printed here is explicitly labeled SPECULATIVE in
@@ -27,6 +29,8 @@ from src.insights.aggregator import Aggregator
 from src.insights.extractor import Extractor, InsightExtractionError
 from src.insights.models import DiscussionInsight, OpportunityCluster
 from src.models import FetchQuery
+from src.verification.models import VerificationReport, VerificationStatus
+from src.verification.verifier import Verifier
 
 
 def _parse_args(argv: List[str]) -> argparse.Namespace:
@@ -85,6 +89,37 @@ def _print_cluster(index: int, cluster: OpportunityCluster) -> None:
     print()
 
 
+def _print_verification_summary(report: VerificationReport) -> None:
+    total = report.total_claims
+    print("=== Verification Summary ===")
+    if total == 0:
+        print("No claims to verify.")
+        return
+
+    def pct(n: int) -> str:
+        return f"{(n / total * 100):.1f}%"
+
+    print(f"Total claims checked: {total}")
+    print(f"  Verified:   {report.verified_count} ({pct(report.verified_count)})")
+    print(f"  Partial:    {report.partial_count} ({pct(report.partial_count)})")
+    print(f"  Unverified: {report.unverified_count} ({pct(report.unverified_count)})")
+    print(f"Overall verification rate (Verified / Total, Partial NOT counted): {report.verification_rate:.1%}\n")
+
+    flagged = [
+        fv
+        for result in report.results
+        for fv in result.field_verifications
+        if fv.verification_status != VerificationStatus.VERIFIED and fv.claim_text
+    ]
+    if flagged:
+        print(f"Claims needing review ({len(flagged)} Partial/Unverified, empty fields omitted):")
+        for fv in flagged:
+            claim_preview = fv.claim_text if len(fv.claim_text) <= 100 else fv.claim_text[:100] + "..."
+            sources = ", ".join(fv.source_discussion_ids)
+            print(f'  [{fv.verification_status.value}] {fv.field_name} ({sources}): "{claim_preview}"')
+        print()
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = _parse_args(argv if argv is not None else sys.argv[1:])
     config = load_config()
@@ -137,6 +172,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"=== {len(clusters)} opportunity cluster(s), ranked (via {aggregator.last_method}) ===\n")
     for i, cluster in enumerate(clusters, start=1):
         _print_cluster(i, cluster)
+
+    report = Verifier().verify_all(insights, posts)
+    _print_verification_summary(report)
 
     return 0
 

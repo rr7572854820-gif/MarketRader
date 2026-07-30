@@ -1,7 +1,13 @@
 # Reddit + Gemini client libraries and .env loading.
-# Verification, grouping, and reporting each add their own dependencies
-# later; do not add anything here that isn't used yet.
+# Report writing adds its own dependencies later; do not add anything
+# here that isn't used yet.
 
 praw>=7.7
 google-genai>=0.3
 python-dotenv>=1.0
+
+# Testing (Task 4 — the verification module is the first thing in this
+# project with real tests; pytest chosen over stdlib unittest for
+# plain-assert syntax and clearer failure output, no heavy transitive
+# dependencies).
+pytest>=8.0
