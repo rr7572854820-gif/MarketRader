@@ -41,6 +41,7 @@ from src.insights.aggregator import Aggregator
 from src.insights.extractor import Extractor, InsightExtractionError
 from src.insights.models import DiscussionInsight, OpportunityCluster
 from src.models import FetchedPost, FetchQuery
+from src.pipeline.cache import CachingAIProvider, ResponseCache
 from src.reporting.formatter import save_markdown_file
 from src.reporting.models import InsightReport
 from src.reporting.report_generator import generate_report
@@ -76,6 +77,18 @@ class PipelineConfig:
         force_mock_fetch: True forces MockFetcher regardless of Reddit
             config. Set together with ai_provider="mock" by --mock in
             the CLI for a single "run this fully offline" switch.
+        cache_enabled: Task 8. When True (default), AI provider
+            responses are cached by prompt hash — re-running the
+            pipeline over overlapping data skips real API calls for
+            anything already seen, which matters given how easily the
+            Gemini free-tier daily quota gets exhausted (see
+            SESSION.md). Only JSON-shaped responses are cached, so
+            Extractor's own retry-on-malformed-JSON always gets a
+            fresh call — see src/pipeline/cache.py for why.
+        cache_path: Where the cache file lives. Relative by default,
+            consistent with output_dir's existing convention (both are
+            resolved relative to the current working directory, not
+            anchored to the project root).
     """
 
     subreddit: str = "all"
@@ -85,6 +98,8 @@ class PipelineConfig:
     ai_provider: str = "auto"
     report_format: str = "both"
     force_mock_fetch: bool = False
+    cache_enabled: bool = True
+    cache_path: Path = Path(".cache") / "ai_responses.json"
 
 
 @dataclass(frozen=True)
@@ -92,6 +107,12 @@ class PipelineExecutionSummary:
     """Requirement 5's logging fields, as a saveable, testable record —
     not just log lines. See pipeline.py's save location:
     output_dir/pipeline_run_<timestamp>.json.
+
+    cache_hits/cache_misses (Task 8): both 0 when cache_enabled=False.
+    ai_calls_made only counts real API calls (cache misses) — a cache
+    hit means no real call happened, so it must never inflate this
+    number; see _CountingAIProvider/CachingAIProvider wiring order in
+    Pipeline.run() for why that's guaranteed, not just documented.
     """
 
     start_time: datetime
@@ -100,6 +121,8 @@ class PipelineExecutionSummary:
     posts_fetched: int
     posts_analyzed: int
     ai_calls_made: int
+    cache_hits: int
+    cache_misses: int
     clusters_found: int
     errors: List[str]
     report_path: Optional[Path]
@@ -153,6 +176,8 @@ class Pipeline:
         insights: List[DiscussionInsight] = []
         clusters: List[OpportunityCluster] = []
         ai_calls_made = 0
+        cache_hits = 0
+        cache_misses = 0
         report_path: Optional[Path] = None
         insight_report: Optional[InsightReport] = None
         succeeded = True
@@ -161,18 +186,31 @@ class Pipeline:
             app_config = load_config()
             fetcher = get_fetcher(app_config, force_mock=self._config.force_mock_fetch)
             ai_provider, ai_provider_label = _resolve_ai_provider_and_label(self._config, app_config)
+
+            # Layering matters: counting must be *inside* caching, so a
+            # cache hit never reaches (and never increments) the call
+            # counter — ai_calls_made must reflect real API usage only.
             counting_provider = _CountingAIProvider(ai_provider)
+            active_provider: AIProvider = counting_provider
+            caching_provider: Optional[CachingAIProvider] = None
+            if self._config.cache_enabled:
+                cache = ResponseCache(self._config.cache_path)
+                caching_provider = CachingAIProvider(counting_provider, cache)
+                active_provider = caching_provider
 
             query = FetchQuery(
                 community=self._config.subreddit, keyword=self._config.keyword, limit=self._config.post_limit
             )
 
             posts = self._fetch(fetcher, query, errors)
-            insights = self._analyze(posts, counting_provider, errors)
-            clusters = self._cluster(insights, counting_provider, errors)
+            insights = self._analyze(posts, active_provider, errors)
+            clusters = self._cluster(insights, active_provider, errors)
 
             verification_report = self._verify(insights, posts)
             ai_calls_made = counting_provider.call_count
+            if caching_provider is not None:
+                cache_hits = caching_provider.hits
+                cache_misses = caching_provider.misses
 
             insight_report = generate_report(clusters, verification_report, posts, ai_provider_label)
             report_path = self._save_outputs(insight_report, start_time)
@@ -190,6 +228,8 @@ class Pipeline:
             posts_fetched=len(posts),
             posts_analyzed=len(insights),
             ai_calls_made=ai_calls_made,
+            cache_hits=cache_hits,
+            cache_misses=cache_misses,
             clusters_found=len(clusters),
             errors=errors,
             report_path=report_path,
@@ -197,11 +237,14 @@ class Pipeline:
         )
         self._save_summary(summary, start_time)
         logger.info(
-            "Pipeline finished in %.1fs: %d posts fetched, %d analyzed, %d AI calls, %d clusters, %d error(s).",
+            "Pipeline finished in %.1fs: %d posts fetched, %d analyzed, %d AI calls "
+            "(%d cache hits, %d misses), %d clusters, %d error(s).",
             summary.duration_seconds,
             summary.posts_fetched,
             summary.posts_analyzed,
             summary.ai_calls_made,
+            summary.cache_hits,
+            summary.cache_misses,
             summary.clusters_found,
             len(summary.errors),
         )
@@ -313,6 +356,8 @@ def _summary_to_dict(summary: PipelineExecutionSummary) -> dict:
         "posts_fetched": summary.posts_fetched,
         "posts_analyzed": summary.posts_analyzed,
         "ai_calls_made": summary.ai_calls_made,
+        "cache_hits": summary.cache_hits,
+        "cache_misses": summary.cache_misses,
         "clusters_found": summary.clusters_found,
         "errors": summary.errors,
         "report_path": str(summary.report_path) if summary.report_path else None,

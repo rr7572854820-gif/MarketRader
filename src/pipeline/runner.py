@@ -139,6 +139,15 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         "SDK's own HTTP request logging) - normally suppressed to keep output readable. "
         "Use this when something needs real debugging.",
     )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable the AI response cache for this run - every prompt gets a fresh API call, "
+        "even if the exact same discussion was analyzed before. Caching is on by default "
+        "(cached in .cache/ai_responses.json) since re-running against overlapping data is "
+        "common and Gemini's free-tier daily quota is easy to exhaust; use this flag when you "
+        "specifically want guaranteed-fresh analysis instead.",
+    )
     return parser.parse_args(argv)
 
 
@@ -181,6 +190,7 @@ def _print_run_summary(result: PipelineRunResult) -> None:
     print(f"Posts fetched:     {summary.posts_fetched}")
     print(f"Posts analyzed:    {summary.posts_analyzed}")
     print(f"AI calls made:     {summary.ai_calls_made}")
+    print(f"Cache hits/misses: {summary.cache_hits}/{summary.cache_misses}")
     print(f"Clusters found:    {summary.clusters_found}")
     print(f"Report location:   {summary.report_path if summary.report_path else '(not saved)'}")
     print(f"Succeeded:         {summary.succeeded}")
@@ -203,6 +213,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         ai_provider="mock" if args.mock else args.ai_provider,
         report_format=args.format,
         force_mock_fetch=args.mock,
+        cache_enabled=not args.no_cache,
     )
 
     result = Pipeline(config).run()

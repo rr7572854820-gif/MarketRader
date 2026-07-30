@@ -75,7 +75,7 @@ class Verifier:
         if insight.source_post_id != source_post.id:
             raise VerificationError(
                 f"Insight claims source_post_id={insight.source_post_id!r} but was given "
-                f"source_post.id={source_post.id!r} — refusing to verify a claim against "
+                f"source_post.id={source_post.id!r} - refusing to verify a claim against "
                 f"the wrong source."
             )
 

@@ -100,6 +100,8 @@ python -m src.pipeline.runner --help
 
 Reports are saved to `output/` as Markdown, alongside a JSON summary of each run (posts fetched, AI calls made, duration, errors). `src/pipeline/runner.py` is the current, actively maintained entrypoint — other scripts under `src/` (`check_connections.py`, `fetch_preview.py`, `analyze_preview.py`) are narrower diagnostic tools for individual pipeline stages, kept for that purpose, not superseded replacements for the full pipeline.
 
+AI responses are cached by default (`.cache/ai_responses.json`, keyed by exact prompt) — re-running the pipeline over overlapping data reuses prior analysis instead of spending real Gemini quota again. Pass `--no-cache` to force fresh calls every time.
+
 ---
 
 For the detailed product requirements behind this vision, see [PRD.md](./PRD.md). For how this project should be developed and how Claude Code should operate within it, see [CLAUDE.md](./CLAUDE.md).

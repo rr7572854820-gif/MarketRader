@@ -14,6 +14,10 @@ env/
 # Generated output (added when the report writer exists — not source)
 output/
 
+# AI response cache (Task 8) — regenerable, not source, and may contain
+# excerpts of fetched content
+.cache/
+
 # OS cruft
 .DS_Store
 Thumbs.db

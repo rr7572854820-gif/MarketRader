@@ -47,6 +47,114 @@ Ideas worth considering later, explicitly not committed to now.
 
 ## Session Log
 
+## Session — 2026-07-31 (Task 9: Final Testing & Cleanup)
+
+### Current Objective
+A complete quality review of the whole system (Tasks 1-8) before considering the core build complete: run the full suite, inspect every module for duplication/error-handling/logging/naming issues, evaluate six named technical-debt items, close real test-coverage gaps, and bring README.md up to date. Structured the same way as Task 8: full plan (assessment, issues found, cleanup plan, files expected to change) presented and approved before any code changed.
+
+### Completed Work
+- **Read every module under `src/`** (fetchers, config, models, AI providers, insights, verification, reporting, pipeline, cache, and all four CLI entrypoints) plus all five pre-existing test files, `README.md`, and git history — not a sampling, a full pass, since a quality review is exactly the kind of task where reading a subset and extrapolating would defeat the point.
+- **Found and fixed one real bug**: [src/verification/verifier.py:78](../src/verification/verifier.py) had an em-dash inside the actual `VerificationError` f-string message — not a docstring or comment, a genuine runtime string, the same Windows-console-encoding bug class caught three times before (Tasks 1/2, 5, 7). Missed previously because those scans focused on `print()`/`log`/argparse help specifically, not exception messages. Confirmed by a full manual sweep of all 98 em-dash occurrences in `src/` that every other one is safely inside a docstring, a `#` comment, or (in `src/insights/prompts.py`) inside AI-facing prompt text sent over HTTP, never touching the Windows console — so this was the only real instance, not a symptom of a wider miss.
+- **Closed the single most significant test-coverage gap in the project**: `src/insights/extractor.py` and `src/insights/aggregator.py` — the two densest pieces of pure business logic (quote verification, JSON parse/retry, score clamping, enum coercion with conservative fallback; AI-clustering response validation/dedup/out-of-range handling, the lexical Jaccard fallback, confidence-aggregation rules) — had zero dedicated unit tests before this session, flagged as open in TODO.md since Task 4 and never done. Added `tests/test_extractor.py` (18 tests) and `tests/test_aggregator.py` (19 tests), both using stub `AIProvider`s, zero real API cost, following the pattern already established in `tests/test_cache.py`.
+- Also closed smaller gaps: `tests/test_fetchers.py` (9 tests — `MockFetcher` keyword/limit/case-insensitivity/community-ignored, `get_fetcher` factory branching) and `tests/test_ai_providers.py` (5 tests — `MockAIProvider`'s response is never valid JSON, asserted directly at the source rather than only inferred downstream from Task 8's cache behavior; `get_ai_provider` factory branching). Both factories and both mock implementations previously had only indirect coverage via pipeline integration tests.
+- Suite grew from 63 to **114** tests (51 new), all passing, confirmed by a full run after all changes.
+- Updated `README.md`'s Getting Started section with the one real drift found: it predated Task 8 and didn't mention the AI response cache (`.cache/ai_responses.json`) or `--no-cache`, despite directly bearing on the Gemini free-tier quota problem the README already discusses.
+- **Evaluated the six named technical-debt items** (`analyze_preview.py` duplication, fetch retry classification, cache path handling, clustering limitations, verification limitations, encoding issues) individually rather than treating "technical debt review" as one undifferentiated pass — see Important Decisions below for the reasoning on each.
+- Confirmed via `git log`/`git status` that Tasks 2, 3, 4, 6, 7 are each committed individually (a prior session's note claiming "nothing committed since the initial planning commit" was stale/incorrect); Task 8's work (`cache.py`, `test_cache.py`, and the `pipeline.py`/`runner.py`/`.gitignore` changes) remains uncommitted as of this session, noted as context, not acted on (committing wasn't requested).
+- Presented the plan and waited for approval, per the task's explicit gate (same pattern as Task 8). Approved scope: items 1-7 (the em-dash fix, all four new test files, the README update, this documentation update) — the two optional items (fetch retry transient/permanent classification; an AST-based non-console-Unicode regression-guard test) and the `analyze_preview.py` decision were surfaced but not included in the approved scope, so left untouched.
+
+### In Progress
+None. Task 9's approved scope is complete: one real bug fixed, the two most significant test-coverage gaps closed (51 new tests, 114/114 passing), README brought current, and every named technical-debt item given an explicit, reasoned disposition rather than a blanket "reviewed."
+
+### Known Issues
+- The two optional items from the approved plan were not done this session (not approved, not silently skipped): `_fetch_with_retry`'s lack of transient/permanent error classification (unlike `GeminiProvider`'s own retry logic) remains as-is; no automated non-ASCII-in-console-strings regression test was built, despite this being the fourth occurrence of that bug class across the project's history.
+- `analyze_preview.py`'s duplication of pipeline/runner.py's orchestration logic remains, unresolved for a fourth time — flagged again, decision still deferred to the user rather than made unilaterally.
+- The deliberate small duplications noted this session (`_FENCE_RE` in three files, `_STOPWORDS`/`_keywords` in two) were reviewed and left alone — each was a considered choice to avoid coupling business-logic modules together or to generic infra, not an oversight; consolidating them into a shared utility module would be a small architecture change for a handful of duplicated lines, judged not clearly worth it without being asked.
+- Task 8's work remains uncommitted, as does this session's — unchanged from before, not part of this session's requested scope.
+- All Known Issues from the Task 3 through 8 entries below that weren't directly addressed this session still apply.
+
+### Next Tasks
+- Whatever comes next per the user's direction.
+- If revisited: the two optional items above, and a decision on `analyze_preview.py`, are the most concrete next steps this session identified but didn't execute.
+
+### Important Decisions
+- Treated "technical debt review" as six separate judgment calls, not one action: fixed the one real bug found (encoding); closed real test gaps (the actual ask behind "evaluate... clustering limitations / verification limitations" was really "is this still accurately documented and untouched," which it was — so no code change there, just confirmation); left cache path handling alone (already a named, accepted risk from Task 8's own approved plan, not a new finding); surfaced `analyze_preview.py` and the retry-classification item as decisions for the user rather than making them silently a fourth time.
+- Chose not to consolidate the deliberately-duplicated `_FENCE_RE`/`_STOPWORDS`/`_keywords` helpers into a shared module. Each duplication was already a considered architectural choice (documented in the modules themselves) to keep business-logic layers from depending on each other or on generic infra — "cleanup" that undoes a deliberate boundary isn't cleanup, it's a small redesign, which was explicitly out of scope for this task.
+- Prioritized `src/insights/extractor.py` and `src/insights/aggregator.py` over other coverage gaps because they are the densest, highest-consequence pure logic in the project (the actual non-fabrication guardrail live in `extractor.py`'s quote verification; the actual clustering-quality fix from Task 3.1 lives in `aggregator.py`'s AI-response parsing) and were the only major modules with zero direct tests, not just thinner coverage.
+- Did not propose committing Task 8's or this session's changes — noted the uncommitted state as useful context for the user, consistent with "only commit when explicitly asked."
+
+### Questions
+- Should `_fetch_with_retry` get transient/permanent classification (mirroring `GeminiProvider`)? Surfaced, not decided.
+- Should the AST-based non-console-Unicode regression test be built now that this bug class has recurred a fourth time? Surfaced, not decided.
+- What should happen to `analyze_preview.py`: leave as-is again, add a deprecation notice, or remove it now that `pipeline/runner.py` fully supersedes it? Surfaced a fourth time, not decided.
+- All still-open questions from the Task 3 through 8 entries below remain open.
+
+### Lessons Learned
+- **A bug-class scan is only as good as the categories it checks.** The three prior em-dash fixes all searched for the pattern in `print()`/`log`/argparse help specifically; this session's full, unscoped manual sweep of every em-dash in `src/` found the one instance those narrower searches structurally couldn't have caught — an exception message, a category none of the three prior fixes had named as in-scope. The lesson isn't "scan more" but "scan for the actual bug (any runtime-visible string), not a proxy for it (strings in the three places it's shown up before)."
+- A quality-review task benefits from resisting the pull to treat every named item as something to *fix*. Half of the six technical-debt items in this task's list were correctly disposed of by confirming they're still accurately documented and still deliberately untouched, not by writing code — treating "review" as synonymous with "patch" would have meant re-touching already-settled, already-reasoned-through decisions (Task 3.1's clustering measurement, Task 4's stemming gap) without new evidence to justify it.
+- Presenting genuinely optional items (the retry classification, the regression test, the `analyze_preview.py` disposition) as explicitly separable from the core approved scope — rather than bundling everything into one plan — meant the user could approve the clear, low-risk core immediately without being blocked on the more judgment-call-dependent extras.
+
+### Future Improvements
+- `_fetch_with_retry` transient/permanent error classification, if picked up.
+- The AST-based non-console-Unicode regression test, if picked up — would need to be scoped to `raise`/`print`/`logger.*`/argparse `help=`/`epilog=` string literals specifically, not all string literals, so it doesn't false-positive on `src/insights/prompts.py`'s legitimate AI-facing prompt text.
+- A decision on `analyze_preview.py`.
+- Committing the currently-uncommitted Task 8 and Task 9 work, when requested.
+
+---
+
+## Session — 2026-07-31 (Task 8: Caching & Performance Improvements)
+
+### Current Objective
+Reduce unnecessary Gemini API calls and improve performance without changing core pipeline behavior. This task explicitly required a plan (what to cache, why, files, risks) with **approval before implementing** — the first task in this project to require that as a hard gate rather than an inline explain-then-proceed step. Waited for and received explicit approval before writing any code.
+
+### Completed Work
+- **Plan approved as proposed**, no changes requested. Grounded in real measured data from this session's own prior runs (an 11.5s / 22.3s pipeline run, both dominated by `generate_text()` wall-clock time) rather than assumed bottlenecks.
+- Built `src/pipeline/cache.py`: `ResponseCache` (flat JSON file, `get`/`set`, fails open on a missing/corrupted file rather than raising) and `CachingAIProvider` (an `AIProvider`-implementing decorator, same pattern as Task 6's `_CountingAIProvider` — transparent to `Extractor` and `Aggregator`, neither needed any changes).
+- **The retry-safety risk named in the plan was real and got handled exactly as proposed**: `CachingAIProvider` only writes to the cache when a response parses as valid JSON (fence-stripping included, matching `Extractor`'s own parser so a valid-but-fenced response isn't under-cached). A malformed response — the case `Extractor`'s own retry loop exists to handle — is never cached, so that retry always gets a fresh call. Verified directly with a dedicated test using a stub that always returns non-JSON text: both calls were real, nothing was ever persisted.
+- **Wiring order matters and was gotten right the first time**, following the plan's explicit design: `CachingAIProvider` wraps `_CountingAIProvider`, which wraps the real provider — so a cache hit never reaches the counting layer, and `ai_calls_made` in the execution summary only ever reflects real API usage, never cache hits. Confirmed by both the unit tests and, more convincingly, a real end-to-end run.
+- Extended `PipelineConfig` with `cache_enabled: bool = True` (on by default, per the plan's stated leaning, not challenged during approval) and `cache_path: Path = Path(".cache") / "ai_responses.json"` (independent of `output_dir` — deliberately, since a cache is meant to be *shared* across runs regardless of where each run's report happens to be saved, not scoped per output location).
+- Extended `PipelineExecutionSummary` with `cache_hits`/`cache_misses`, threaded through the JSON summary file, the log line, and the CLI's printed run summary — not part of the original files-to-change list explicitly, but a natural, low-cost extension of a file already being touched, directly serving "Verify cache hits avoid AI calls" as a *visible*, not just internally-tested, property.
+- Added `--no-cache` to `src/pipeline/runner.py`, threaded into `PipelineConfig.cache_enabled=not args.no_cache`. Added `.cache/` to `.gitignore`.
+- Wrote `tests/test_cache.py` — 16 tests: `ResponseCache` roundtrip/persistence/missing-file/corrupted-file/non-dict-JSON handling; `CachingAIProvider` hit/miss counting, cross-prompt isolation, the retry-safety property, fenced-JSON recognition, and connection-check delegation; two full `Pipeline`-level integration tests (warm-cache run makes zero real AI calls; disabled cache always makes fresh calls) using a monkeypatched stub provider that returns valid, schema-conforming JSON (unlike `MockAIProvider`, whose fixed placeholder text is deliberately never valid JSON and therefore never cacheable by design); CLI flag parsing and an end-to-end `--no-cache` smoke test.
+- **Found and fixed a real test-isolation bug the hard way**: three tests used a bare relative `Path("unused")` intending "never actually persists," but `ResponseCache` genuinely writes to whatever path it's given — this created a real file at `<project_root>/unused` that persisted *across separate pytest invocations*, not just within one session. Standalone `test_cache.py` runs passed; the same file run as part of the full suite (a second invocation, after the first had already written `./unused`) failed, because two tests came back as cache *hits* from leftover disk state instead of the fresh misses they expected. Diagnosed precisely (inspected the actual stray file's contents, matched its keys to the failing assertions), fixed by using `tmp_path` in every `ResponseCache` construction, and re-verified by running the full suite twice in a row — the exact scenario that exposed the bug in the first place.
+- **Ran a genuine, real-Gemini, real-CLI end-to-end demonstration**, not just tests: same command (`--keyword scheduler --limit 1`, `gemini-flash-lite-latest` — default model's quota was exhausted yet again on the first attempt) run twice with the same cache location. Run 1 (cold): 6.1s, 2 real AI calls, 0 cache hits. Run 2 (warm): 0.0s, 0 real AI calls, 2 cache hits. Inspected the actual persisted `.cache/ai_responses.json` afterward and confirmed exactly 2 real, distinct Gemini responses (one extraction, one clustering) were stored and correctly reused.
+- Ran the full test suite (63 tests: 47 prior + 16 new) — all passing, twice in a row.
+
+### In Progress
+None. Task 8 is complete: approved plan implemented exactly as proposed, all named risks handled as designed, 16 new tests (suite now 63), a real test-isolation bug found and fixed via the same discipline (measure, don't assume) this project has used all session, and a genuine real-provider end-to-end demonstration with measured before/after numbers.
+
+### Known Issues
+- `cache_path` has no CLI override (`--cache-path`) — out of the approved scope, which only asked for `--no-cache`. The cache always lives at `.cache/ai_responses.json` relative to the current working directory, independent of `--output-dir`.
+- Following `output_dir`'s existing precedent (Task 6), `cache_path`'s default is relative to the current working directory, not anchored to the project root the way `.env` loading was fixed to be in Task 7. This is consistent with existing behavior, not a regression, but means a pipeline invoked from different working directories would use *different* cache files — worth knowing, not fixed here (out of scope; `output_dir` has the identical property and was left alone in Task 7 for the same reason).
+- No eviction, TTL, or size bound on the cache file, exactly as flagged as an accepted risk in the approved plan — will grow unbounded with real, varied usage. Not a near-term problem at personal-tool scale.
+- All Known Issues from the Task 3 through 7 entries below still apply except what this session directly addressed.
+
+### Next Tasks
+- Whatever comes next per the user's direction — no task number was given to explicitly avoid this time.
+- If cache growth or path predictability ever become real problems (not just theoretical ones), both are cheap, well-understood fixes flagged above, not designed here.
+
+### Important Decisions
+- Followed the "wait for approval" instruction literally — this is the first task in the project with that explicit gate, and it was treated as a hard stop, not the same "explain then proceed" rhythm used for every previous plan-then-implement task.
+- Chose to gate caching on JSON-validity rather than any more targeted, schema-aware check — simpler, and correct for every consumer that exists today, at the cost of being a heuristic that assumes JSON-shaped responses rather than a guarantee. Flagged as a real (if minor) coupling in the original plan; implemented exactly as proposed since it wasn't challenged during approval.
+- Extended `PipelineExecutionSummary` with cache stats even though it wasn't in the original "files that will change" table — judged as clearly in the spirit of the approved plan (making "cache hits avoid AI calls" independently verifiable, not just internally true) rather than scope creep requiring a second approval round.
+- Fixed the `Path("unused")` test-isolation bug by changing the tests, not the cache implementation — the bug was entirely in test design (a real file path being used as a stand-in for "no persistence"), not in `ResponseCache`'s actual behavior, which was correct throughout.
+- Verified the core "cache hits avoid AI calls" claim three separate ways before considering it proven: a targeted unit test, a full-pipeline test with a monkeypatched stub, and a real, unscripted CLI run against the actual Gemini API with before/after timing. Any one alone would have been weaker evidence than all three together.
+
+### Questions
+- All still-open questions from the Task 3 through 7 entries below remain open. None new this session — the approved plan didn't leave anything unresolved that surfaced during implementation.
+
+### Lessons Learned
+- **A placeholder value meant to signal "this shouldn't matter" can still have real side effects if the code under test doesn't know it's a placeholder.** `Path("unused")` read as an obviously-fake path to a human; to `ResponseCache`, it was just a path to write real data to. The fix (`tmp_path`) is the same lesson Task 7 already learned about `.env` isolation, applied to a new context — worth generalizing: **any test claiming "this won't persist" for a component whose whole job is persisting should prove it with an isolated, disposable path, never a placeholder name.**
+- Running the full suite twice in a row after fixing a suspected test-isolation bug is a cheap, direct way to confirm the fix actually addresses cross-invocation state, not just cross-test-within-one-session state — a single passing run wouldn't have distinguished between "fixed" and "got lucky this time."
+- A plan approved without requested changes is still worth re-verifying empirically during implementation, not just trusted as correct because it was approved — the retry-safety mitigation, the wiring order, and the JSON-validity gate were all things the plan *proposed correctly*, but each still got a dedicated test proving the proposal actually worked as designed, not just as described.
+
+### Future Improvements
+- `--cache-path` CLI override, if ever needed.
+- Cache eviction/TTL, if the file ever grows large enough to matter in practice.
+- Anchoring `cache_path` (and `output_dir`) to the project root the same way `.env` was fixed in Task 7, if cwd-dependence ever causes a real, observed problem rather than a theoretical one.
+
+---
+
 ## Session — 2026-07-30 (Task 7: Configuration & CLI Polish)
 
 ### Current Objective
