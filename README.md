@@ -62,6 +62,44 @@ Over time, the range of sources it draws on is expected to grow  toward the kind
 
 As it matures, MarketRadar should also grow more capable along other dimensions described in its [product requirements](./PRD.md): detecting whether a problem is growing over time, identifying existing competitors and their weaknesses, and estimating willingness to pay — always in service of the same goal, helping founders spend less time searching and more time validating.
 
+## Getting Started
+
+This section covers running the code, not the product vision above — see [PRD.md](./PRD.md) for requirements and [SESSION.md](./SESSION.md) for the detailed history of how it was built.
+
+**Prerequisites:** Python 3.10+.
+
+**1. Install dependencies** (a virtual environment is recommended but not required):
+
+```
+pip install -r requirements.txt
+```
+
+**2. Configure.** Copy `.env.example` to `.env` and fill it in:
+
+- **Gemini (required for real analysis):** free tier available — create a key at https://aistudio.google.com/apikey and set `GEMINI_API_KEY`.
+- **Reddit (optional):** leave blank to use built-in mock sample data instead of real Reddit posts. To use real data, create a script app at https://www.reddit.com/prefs/apps and set `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` / `REDDIT_USER_AGENT`.
+
+**3. Verify your setup:**
+
+```
+python -m src.check_connections
+```
+
+**4. Run it.** The full pipeline (Fetch → Analyze → Cluster → Verify → Report) runs with one command:
+
+```
+# Fully offline, zero cost — good for a first run or for testing:
+python -m src.pipeline.runner --mock
+
+# Real Reddit + real Gemini, targeting a subreddit:
+python -m src.pipeline.runner --subreddit startups
+
+# See every option:
+python -m src.pipeline.runner --help
+```
+
+Reports are saved to `output/` as Markdown, alongside a JSON summary of each run (posts fetched, AI calls made, duration, errors). `src/pipeline/runner.py` is the current, actively maintained entrypoint — other scripts under `src/` (`check_connections.py`, `fetch_preview.py`, `analyze_preview.py`) are narrower diagnostic tools for individual pipeline stages, kept for that purpose, not superseded replacements for the full pipeline.
+
 ---
 
 For the detailed product requirements behind this vision, see [PRD.md](./PRD.md). For how this project should be developed and how Claude Code should operate within it, see [CLAUDE.md](./CLAUDE.md).

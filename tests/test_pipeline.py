@@ -221,3 +221,73 @@ def test_cli_mock_flag_runs_fully_offline_end_to_end(tmp_path: Path):
     assert exit_code == 0
     assert list(tmp_path.glob("report_*.md"))
     assert list(tmp_path.glob("pipeline_run_*.json"))
+
+
+# --- Task 7: CLI validation ---------------------------------------------------
+
+
+@pytest.mark.parametrize("bad_limit", ["0", "-5", "abc", "3.5"])
+def test_cli_rejects_invalid_limit_with_clean_error(bad_limit: str, capsys):
+    from src.pipeline.runner import main
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--mock", "--limit", bad_limit])
+
+    assert exc_info.value.code == 2  # argparse's standard "bad usage" exit code
+    captured = capsys.readouterr()
+    assert "--limit" in captured.err
+
+
+def test_cli_rejects_blank_subreddit_with_clean_error(capsys):
+    from src.pipeline.runner import main
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--mock", "--subreddit", "   "])
+
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert "--subreddit" in captured.err
+
+
+def test_cli_accepts_valid_positive_limit():
+    from src.pipeline.runner import _positive_int
+
+    assert _positive_int("1") == 1
+    assert _positive_int("25") == 25
+
+
+def test_cli_help_exits_zero_and_lists_all_flags(capsys):
+    from src.pipeline.runner import main
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--help"])
+
+    assert exc_info.value.code == 0
+    captured = capsys.readouterr()
+    for flag in ["--subreddit", "--keyword", "--limit", "--output-dir", "--ai-provider", "--format", "--mock", "--verbose"]:
+        assert flag in captured.out
+
+
+# --- Task 7: logging configuration --------------------------------------------
+
+
+def test_configure_logging_default_suppresses_third_party_but_shows_our_own():
+    import logging
+
+    from src.pipeline.runner import _configure_logging
+
+    _configure_logging(verbose=False)
+
+    assert logging.getLogger().getEffectiveLevel() == logging.WARNING  # third-party stays quiet
+    assert logging.getLogger("src").getEffectiveLevel() == logging.INFO  # our own logs show
+
+
+def test_configure_logging_verbose_shows_everything():
+    import logging
+
+    from src.pipeline.runner import _configure_logging
+
+    _configure_logging(verbose=True)
+
+    assert logging.getLogger().getEffectiveLevel() == logging.DEBUG
+    assert logging.getLogger("src").getEffectiveLevel() == logging.DEBUG

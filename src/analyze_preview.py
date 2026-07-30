@@ -1,5 +1,11 @@
 """Tasks 3-5 demo: Fetch -> Analyze -> Cluster -> Verify -> Generate Report.
 
+NOTE (Task 7): src/pipeline/runner.py is now the maintained entrypoint
+for running the full pipeline (adds configuration, retry, logging, and
+a saved execution summary this script doesn't have). This file still
+works and isn't going away, but prefer `python -m src.pipeline.runner`
+for anything beyond ad hoc manual testing of this exact five-stage flow.
+
 Run from the project root:
     python -m src.analyze_preview COMMUNITY [--keyword X] [--limit N] [--no-save]
 

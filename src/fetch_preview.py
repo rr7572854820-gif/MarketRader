@@ -3,7 +3,10 @@
 Fetches posts — real Reddit data or mock sample data, chosen
 automatically from config.reddit_configured — and prints them so you
 can confirm the fetcher works. Does not extract, verify, group, or
-write a report; that's later tasks.
+write a report — for the full pipeline, use
+`python -m src.pipeline.runner` (Task 6/7) instead. This script stays
+useful on its own for isolating problems to the Fetcher specifically,
+without spending any AI calls.
 
 Run from the project root:
     python -m src.fetch_preview SOME_SUBREDDIT
