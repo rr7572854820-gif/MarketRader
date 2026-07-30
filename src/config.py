@@ -8,47 +8,60 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Optional
 
 from dotenv import load_dotenv
 
-DEFAULT_CLAUDE_MODEL = "claude-sonnet-5"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+MOCK_USER_AGENT = "marketradar-mock-mode (no real Reddit credentials configured)"
 
 
-class ConfigError(Exception):
-    """Raised when required configuration is missing or empty."""
-
-
-def _require(name: str) -> str:
+def _optional(name: str) -> Optional[str]:
     value = os.environ.get(name)
-    if not value:
-        raise ConfigError(
-            f"Missing required environment variable: {name}. "
-            f"Copy .env.example to .env and fill it in."
-        )
-    return value
+    return value if value else None
 
 
 @dataclass(frozen=True)
 class Config:
-    reddit_client_id: str
-    reddit_client_secret: str
+    # Both Reddit and Gemini are optional at the config-loading level —
+    # nothing here can fail to load. Each consumer decides what it
+    # actually needs (e.g. the Fetcher needs neither an AI key nor real
+    # Reddit creds to run in mock mode; check_connections.py wants both
+    # reported clearly) and checks the relevant *_configured property
+    # itself, rather than the whole project failing to start because one
+    # unrelated credential is missing.
+    gemini_api_key: Optional[str]
+    gemini_model: str
+    reddit_client_id: Optional[str]
+    reddit_client_secret: Optional[str]
     reddit_user_agent: str
-    anthropic_api_key: str
-    claude_model: str
+
+    @property
+    def reddit_configured(self) -> bool:
+        """True only when real Reddit credentials are present."""
+        return bool(self.reddit_client_id and self.reddit_client_secret)
+
+    @property
+    def gemini_configured(self) -> bool:
+        """True only when a Gemini API key is present."""
+        return bool(self.gemini_api_key)
 
 
 def load_config() -> Config:
-    """Loads .env (if present) and returns a validated Config.
+    """Loads .env (if present) and returns a Config.
 
-    Raises ConfigError, with a message naming which variable is missing,
-    if anything required is absent. Never returns partial/default secrets.
+    Always succeeds — loading configuration and requiring a particular
+    value to be present are different concerns. Whichever code path
+    actually needs Reddit or Gemini checks Config.reddit_configured /
+    Config.gemini_configured and fails loudly itself, with a message
+    specific to what it was trying to do.
     """
     load_dotenv()  # no-op if .env doesn't exist — safe to call unconditionally
 
     return Config(
-        reddit_client_id=_require("REDDIT_CLIENT_ID"),
-        reddit_client_secret=_require("REDDIT_CLIENT_SECRET"),
-        reddit_user_agent=_require("REDDIT_USER_AGENT"),
-        anthropic_api_key=_require("ANTHROPIC_API_KEY"),
-        claude_model=os.environ.get("CLAUDE_MODEL") or DEFAULT_CLAUDE_MODEL,
+        gemini_api_key=_optional("GEMINI_API_KEY"),
+        gemini_model=os.environ.get("GEMINI_MODEL") or DEFAULT_GEMINI_MODEL,
+        reddit_client_id=_optional("REDDIT_CLIENT_ID"),
+        reddit_client_secret=_optional("REDDIT_CLIENT_SECRET"),
+        reddit_user_agent=os.environ.get("REDDIT_USER_AGENT") or MOCK_USER_AGENT,
     )

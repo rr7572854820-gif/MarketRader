@@ -1,7 +1,7 @@
-# Task 1 dependencies only — Reddit + Claude client libraries and .env loading.
-# Fetching, extraction, verification, grouping, and reporting each add their
-# own dependencies later; do not add anything here that Task 1 doesn't use.
+# Reddit + Gemini client libraries and .env loading.
+# Verification, grouping, and reporting each add their own dependencies
+# later; do not add anything here that isn't used yet.
 
 praw>=7.7
-anthropic>=0.40
+google-genai>=0.3
 python-dotenv>=1.0
