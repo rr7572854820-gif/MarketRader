@@ -6,7 +6,7 @@
 
 ## What MarketRadar Is
 
-MarketRadar is an AI-powered research assistant that continuously analyzes public conversations — reviews, complaints, feature requests, discussions, and trends — to surface business problems that are real, recurring, growing, and poorly solved.
+MarketRadar is an AI-powered research assistant that continuously analyzes public conversations — reviews, complaints, feature requests, discussions, and trends to surface business problems that are real, recurring, growing, and poorly solved.
 
 MarketRadar is **not** a startup idea generator. It does not invent ideas, brainstorm concepts, or produce inspirational lists of "100 startup ideas." Idea generators produce plausible-sounding fiction. MarketRadar produces evidence.
 
@@ -27,15 +27,15 @@ MarketRadar is explicitly **not** for people who want a shortcut past the hard p
 
 Most startups don't fail because their execution was bad. They fail because they were built on a problem that wasn't actually painful, wasn't actually growing, or was already well-served by someone else.
 
-The information needed to avoid that mistake already exists publicly — scattered across Reddit threads, GitHub issues, one-star reviews, and Hacker News comments — but no one has time to read all of it, and human pattern-recognition is bad at spotting weak signals across thousands of sources over time.
+The information needed to avoid that mistake already exists publicly  scattered across Reddit threads, GitHub issues, one-star reviews, and Hacker News comments  but no one has time to read all of it, and human pattern-recognition is bad at spotting weak signals across thousands of sources over time.
 
-MarketRadar exists to close that gap: to do the tedious, distributed reading that a thorough human researcher would do, at a scale no human can sustain, and to present findings the way a rigorous analyst would — with sources, caveats, and honest uncertainty, not with hype.
+MarketRadar exists to close that gap: to do the tedious, distributed reading that a thorough human researcher would do, at a scale no human can sustain, and to present findings the way a rigorous analyst would  with sources, caveats, and honest uncertainty, not with hype.
 
 ## Long-Term Vision
 
-Today, most founders ask: **"What startup should I build?"** — and get an answer built on guesswork, trend-chasing, or a list of ideas that all sound plausible and are all equally unfounded.
+Today, most founders ask: **"What startup should I build?"** and get an answer built on guesswork, trend-chasing, or a list of ideas that all sound plausible and are all equally unfounded.
 
-MarketRadar exists so founders can instead ask: **"What problems are growing, painful, and still poorly solved?"** — and get an answer built on evidence.
+MarketRadar exists so founders can instead ask: **"What problems are growing, painful, and still poorly solved?"**  and get an answer built on evidence.
 
 Over time, MarketRadar should become the default first step in company formation — the tool a founder opens before they open a blank document to write a pitch. Its long-term ambition is to be recognized as the world's best AI research assistant for people trying to find problems worth solving, not by generating more ideas, but by helping people trust fewer, better-evidenced ones.
 
@@ -58,7 +58,7 @@ Alongside these, MarketRadar holds itself to a strict standard of intellectual h
 
 MarketRadar starts narrow. The MVP will draw on a small number of public sources, analyzed carefully, rather than a large number analyzed shallowly. Depth and trustworthiness come before breadth.
 
-Over time, the range of sources it draws on is expected to grow — toward the kind of coverage that includes places like Reddit, Hacker News, Product Hunt, GitHub Issues and Discussions, G2 and Capterra reviews, X, LinkedIn, YouTube comments, Discord communities, blogs, news, forums, product documentation, and changelogs. This breadth is a long-term destination, not a launch requirement, and which sources come online first will be decided by where they yield the clearest, most defensible evidence — not by which are easiest to integrate.
+Over time, the range of sources it draws on is expected to grow  toward the kind of coverage that includes places like Reddit, Hacker News, Product Hunt, GitHub Issues and Discussions, G2 and Capterra reviews, X, LinkedIn, YouTube comments, Discord communities, blogs, news, forums, product documentation, and changelogs. This breadth is a long-term destination, not a launch requirement, and which sources come online first will be decided by where they yield the clearest, most defensible evidence  not by which are easiest to integrate.
 
 As it matures, MarketRadar should also grow more capable along other dimensions described in its [product requirements](./PRD.md): detecting whether a problem is growing over time, identifying existing competitors and their weaknesses, and estimating willingness to pay — always in service of the same goal, helping founders spend less time searching and more time validating.
 
