@@ -18,14 +18,20 @@ from src.fetchers.reddit_fetcher import RedditFetcher
 __all__ = ["Fetcher", "FetcherError", "get_fetcher"]
 
 
-def get_fetcher(config: Config) -> Fetcher:
+def get_fetcher(config: Config, *, force_mock: bool = False) -> Fetcher:
     """Return the Fetcher appropriate for the current configuration.
 
     Real Reddit access is used only when config.reddit_configured is
     True; a MockFetcher is returned automatically otherwise. No code
     change is needed to switch — set or unset REDDIT_CLIENT_ID /
     REDDIT_CLIENT_SECRET in .env.
+
+    Args:
+        force_mock: If True, always returns MockFetcher regardless of
+            config — e.g. for a CLI --mock flag (see src/pipeline/).
+            This is the sanctioned way to force mock mode; still never
+            construct MockFetcher directly outside this factory.
     """
-    if config.reddit_configured:
+    if not force_mock and config.reddit_configured:
         return RedditFetcher(config)
     return MockFetcher()

@@ -18,13 +18,20 @@ from src.config import Config
 __all__ = ["AIProvider", "AIProviderError", "get_ai_provider"]
 
 
-def get_ai_provider(config: Config) -> AIProvider:
+def get_ai_provider(config: Config, *, force_mock: bool = False) -> AIProvider:
     """Return the AIProvider appropriate for the current configuration.
 
     Real Gemini access is used only when config.gemini_configured is
     True; a MockAIProvider is returned automatically otherwise. No code
     change is needed to switch — set or unset GEMINI_API_KEY in .env.
+
+    Args:
+        force_mock: If True, always returns MockAIProvider regardless
+            of config — e.g. for a CLI --mock flag (see
+            src/pipeline/). This is the sanctioned way to force mock
+            mode; still never construct MockAIProvider directly
+            outside this factory.
     """
-    if config.gemini_configured:
+    if not force_mock and config.gemini_configured:
         return GeminiProvider(config)
     return MockAIProvider()

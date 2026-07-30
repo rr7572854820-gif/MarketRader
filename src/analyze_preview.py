@@ -1,25 +1,27 @@
-"""Task 3 + Task 4 demo: Fetch -> Analyze -> Cluster -> Verify -> Print.
+"""Tasks 3-5 demo: Fetch -> Analyze -> Cluster -> Verify -> Generate Report.
 
 Run from the project root:
-    python -m src.analyze_preview COMMUNITY [--keyword X] [--limit N]
+    python -m src.analyze_preview COMMUNITY [--keyword X] [--limit N] [--no-save]
 
-Uses the same Fetcher (src/fetchers/), AIProvider (src/ai/), and
-Verifier (src/verification/) abstractions as the rest of the project —
-works identically against mock or real Reddit data, and against Gemini
-or any future AI provider, with no changes to this file. Verification
-makes zero AI calls, so it runs the same whether or not a real
-AIProvider is configured.
+Uses the same Fetcher (src/fetchers/), AIProvider (src/ai/), Verifier
+(src/verification/), and reporting (src/reporting/) abstractions as the
+rest of the project — works identically against mock or real Reddit
+data, and against Gemini or any future AI provider, with no changes to
+this file. Verification and reporting both make zero AI calls, so they
+run the same whether or not a real AIProvider is configured.
 
 Every opportunity_score, urgency_score, user_persona, and
 startup_opportunity printed here is explicitly labeled SPECULATIVE in
 the output — see src/insights/models.py for why that label is not
-optional.
+optional. The final report additionally saves a Markdown file to
+output/ unless --no-save is passed.
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from typing import List, Optional
 
 from src.ai import get_ai_provider
@@ -29,6 +31,8 @@ from src.insights.aggregator import Aggregator
 from src.insights.extractor import Extractor, InsightExtractionError
 from src.insights.models import DiscussionInsight, OpportunityCluster
 from src.models import FetchQuery
+from src.reporting.formatter import format_terminal, save_markdown_file
+from src.reporting.report_generator import generate_report
 from src.verification.models import VerificationReport, VerificationStatus
 from src.verification.verifier import Verifier
 
@@ -42,6 +46,9 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
     )
     parser.add_argument("--keyword", default=None, help="Optional keyword filter.")
     parser.add_argument("--limit", type=int, default=25, help="Max posts to fetch.")
+    parser.add_argument(
+        "--no-save", action="store_true", help="Don't write the Markdown report to output/."
+    )
     return parser.parse_args(argv)
 
 
@@ -129,9 +136,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     extractor = Extractor(ai_provider)
 
     fetch_mode = "REAL Reddit data" if config.reddit_configured else "MOCK sample data"
-    ai_mode = "REAL Gemini" if config.gemini_configured else "MOCK AI provider"
+    ai_provider_label = (
+        f"Google Gemini ({config.gemini_model})" if config.gemini_configured else "Mock AI provider"
+    )
     print(f"Fetching using: {fetch_mode}")
-    print(f"Analyzing using: {ai_mode}\n")
+    print(f"Analyzing using: {ai_provider_label}\n")
 
     query = FetchQuery(community=args.community, keyword=args.keyword, limit=args.limit)
 
@@ -173,8 +182,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     for i, cluster in enumerate(clusters, start=1):
         _print_cluster(i, cluster)
 
-    report = Verifier().verify_all(insights, posts)
-    _print_verification_summary(report)
+    verification_report = Verifier().verify_all(insights, posts)
+    _print_verification_summary(verification_report)
+
+    insight_report = generate_report(clusters, verification_report, posts, ai_provider_label)
+    print(format_terminal(insight_report))
+
+    if not args.no_save:
+        output_path = Path("output") / f"report_{insight_report.project_health.analysis_timestamp:%Y%m%d_%H%M%S}.md"
+        save_markdown_file(insight_report, output_path)
+        print(f"\nMarkdown report saved to: {output_path}")
 
     return 0
 
