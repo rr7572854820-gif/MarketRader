@@ -11,3 +11,16 @@ python-dotenv>=1.0
 # plain-assert syntax and clearer failure output, no heavy transitive
 # dependencies).
 pytest>=8.0
+
+# REST API (Task 10). fastapi's own TestClient needs httpx, which was
+# already an indirect dependency of google-genai - listed here anyway
+# since tests/test_api.py depends on it directly, not just indirectly.
+fastapi>=0.110
+uvicorn>=0.29
+httpx>=0.27
+
+# GitHubFetcher (GitHub Issues data source). Already an indirect
+# dependency of other packages here, listed directly anyway since
+# src/fetchers/github_fetcher.py imports it directly — same reasoning
+# as httpx above.
+requests>=2.31

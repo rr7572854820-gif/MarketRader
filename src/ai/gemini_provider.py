@@ -7,14 +7,29 @@ directly by pipeline code — see src/ai/base.py.
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Optional
 
 from src.ai.base import AIProvider, AIProviderError
 from src.config import Config
 
+logger = logging.getLogger(__name__)
+
 _MAX_ATTEMPTS = 3
 _BASE_DELAY_SECONDS = 1.0
+_REDACTED = "<redacted>"
+
+
+def _redact_secret(text: str, secret: Optional[str]) -> str:
+    """Strips a known secret value (e.g. the API key) out of an error
+    string before it's logged or raised. Diagnostic-only helper - see
+    generate_text's exception handling below (temporary investigation,
+    not a permanent behavior change).
+    """
+    if secret:
+        return text.replace(secret, _REDACTED)
+    return text
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -76,7 +91,16 @@ class GeminiProvider(AIProvider):
                 if _is_retryable(exc) and attempt < _MAX_ATTEMPTS - 1:
                     time.sleep(_BASE_DELAY_SECONDS * (2**attempt))
                     continue
-                raise AIProviderError(f"Gemini generation failed ({type(exc).__name__})") from exc
+                # TEMPORARY diagnostic instrumentation (investigation only,
+                # not a permanent behavior change): surfaces the SDK's own
+                # error detail instead of just the exception type name, so
+                # the real root cause (bad key vs. quota vs. model-not-
+                # found vs. something else) is actually visible. The API
+                # key itself is redacted defensively in case the SDK ever
+                # echoes request details back in an error message.
+                detail = _redact_secret(str(exc), self._api_key)
+                logger.error("Gemini generate_content failed (%s): %s", type(exc).__name__, detail)
+                raise AIProviderError(f"Gemini generation failed ({type(exc).__name__}): {detail}") from exc
             else:
                 if not response.text:
                     raise AIProviderError("Gemini returned an empty response.")

@@ -59,6 +59,10 @@ class Config:
     reddit_client_id: Optional[str]
     reddit_client_secret: Optional[str]
     reddit_user_agent: str
+    # Defaulted (unlike the fields above) so every existing Config(...)
+    # call site - test fixtures especially - keeps working unchanged;
+    # GitHub was added after those call sites already existed.
+    github_token: Optional[str] = None
 
     @property
     def reddit_configured(self) -> bool:
@@ -94,4 +98,5 @@ def load_config(dotenv_path: Optional[Path] = None) -> Config:
         reddit_client_id=_env_str("REDDIT_CLIENT_ID"),
         reddit_client_secret=_env_str("REDDIT_CLIENT_SECRET"),
         reddit_user_agent=_env_str("REDDIT_USER_AGENT") or MOCK_USER_AGENT,
+        github_token=_env_str("GITHUB_TOKEN"),
     )

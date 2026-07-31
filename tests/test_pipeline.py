@@ -131,26 +131,36 @@ def test_fetch_retry_succeeds_after_transient_failures():
 
 
 def test_full_pipeline_offline_mock_never_raises_and_produces_summary(tmp_path: Path):
-    """Mock AI returns plain text, not JSON, so every extraction will
-    fail verification-of-structure and the run produces zero insights.
-    This is a genuine, useful test of graceful degradation: the
+    """MockAIProvider returns schema-valid JSON (with real, verbatim
+    quotes pulled from each post's own text), so every extraction now
+    succeeds in one call with no retry, and clustering runs the real
+    AI-assisted path rather than falling back to lexical overlap. The
     pipeline must still complete, still save a report and a summary,
-    and still report succeeded=True (a per-post extraction failure is
-    not an "unexpected pipeline failure").
+    and still report succeeded=True.
+
+    cache_path is isolated to tmp_path: valid mock JSON is now
+    cacheable (unlike before this fix), so without isolation this test
+    would read/write the project's real, persistent .cache/ file (see
+    PipelineConfig.cache_path's repo-relative default) and its
+    ai_calls_made assertion would depend on prior test runs.
     """
     config = PipelineConfig(
-        subreddit="test", post_limit=3, output_dir=tmp_path, ai_provider="mock", force_mock_fetch=True
+        subreddit="test",
+        post_limit=3,
+        output_dir=tmp_path,
+        ai_provider="mock",
+        force_mock_fetch=True,
+        cache_path=tmp_path / "ai_cache.json",
     )
 
     result = Pipeline(config).run()
 
     assert result.summary.succeeded is True
     assert result.summary.posts_fetched == 3
-    assert result.summary.posts_analyzed == 0  # every extraction fails against mock (non-JSON) text
-    # Extractor (Task 3) retries once on malformed JSON before giving up, and
-    # MockAIProvider always returns non-JSON, so every post costs 2 calls.
-    assert result.summary.ai_calls_made == 6
-    assert len(result.summary.errors) == 3  # one extraction-failure message per post
+    assert result.summary.posts_analyzed == 3  # every extraction succeeds against valid mock JSON
+    # One extraction call per post (no retry needed) + one clustering call.
+    assert result.summary.ai_calls_made == 4
+    assert len(result.summary.errors) == 0
     assert result.summary.report_path is not None
     assert result.summary.report_path.exists()
     assert result.report is not None

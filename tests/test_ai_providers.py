@@ -33,24 +33,31 @@ def test_mock_provider_check_connection_never_raises():
     MockAIProvider().check_connection()  # must not raise
 
 
-def test_mock_provider_response_is_clearly_labeled():
-    response = MockAIProvider().generate_text("any prompt")
-    assert response.startswith(MOCK_RESPONSE_PREFIX)
-
-
-def test_mock_provider_response_is_never_valid_json():
-    """This is the exact assumption src/pipeline/cache.py's
-    CachingAIProvider relies on to guarantee mock runs never cache
-    anything (see tests/test_cache.py) - worth asserting directly here
-    too, at the source, rather than only indirectly downstream.
+def test_mock_provider_response_is_valid_json():
+    """MockAIProvider returns schema-valid JSON (see
+    tests/ai/test_mock_provider.py for the schema-shape assertions) so
+    Extractor/Aggregator can actually exercise their real parsing and
+    verification logic against mock data instead of always hitting the
+    malformed-JSON path. Since it's now valid JSON, CachingAIProvider
+    (src/pipeline/cache.py) will cache mock responses same as real
+    ones - see tests/test_cache.py, which no longer assumes otherwise.
     """
     response = MockAIProvider().generate_text("any prompt")
-    try:
-        json.loads(response)
-        is_json = True
-    except json.JSONDecodeError:
-        is_json = False
-    assert not is_json
+    json.loads(response)  # must not raise
+
+
+def test_mock_provider_extraction_response_labels_speculative_fields_as_mock():
+    """Not every field can carry MOCK_RESPONSE_PREFIX literally (quotes
+    must be verbatim source substrings), but the speculative ones -
+    exactly the fields a human could mistake for a genuine finding -
+    still are. See tests/ai/test_mock_provider.py for the full schema
+    coverage.
+    """
+    from src.insights.prompts import build_extraction_prompt
+
+    prompt = build_extraction_prompt("A title", "Some discussion text.", "mock://sample/x")
+    data = json.loads(MockAIProvider().generate_text(prompt))
+    assert data["user_persona"].startswith(MOCK_RESPONSE_PREFIX)
 
 
 # --- get_ai_provider factory ----------------------------------------------------

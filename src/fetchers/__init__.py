@@ -12,26 +12,42 @@ from __future__ import annotations
 
 from src.config import Config
 from src.fetchers.base import Fetcher, FetcherError
+from src.fetchers.github_fetcher import GitHubFetcher
 from src.fetchers.mock_fetcher import MockFetcher
 from src.fetchers.reddit_fetcher import RedditFetcher
 
 __all__ = ["Fetcher", "FetcherError", "get_fetcher"]
 
 
-def get_fetcher(config: Config, *, force_mock: bool = False) -> Fetcher:
-    """Return the Fetcher appropriate for the current configuration.
+def get_fetcher(config: Config, *, source: str = "reddit", force_mock: bool = False) -> Fetcher:
+    """Return the Fetcher appropriate for the requested source.
 
-    Real Reddit access is used only when config.reddit_configured is
-    True; a MockFetcher is returned automatically otherwise. No code
-    change is needed to switch — set or unset REDDIT_CLIENT_ID /
-    REDDIT_CLIENT_SECRET in .env.
+    Real Reddit access is used only when source="reddit" (the default,
+    unchanged from before GitHub existed) and config.reddit_configured
+    is True; a MockFetcher is returned automatically otherwise. No code
+    change is needed to switch Reddit on/off — set or unset
+    REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET in .env.
+
+    source="github" always returns a real GitHubFetcher (unless
+    force_mock) — unlike Reddit, GitHub has no "configured" boolean to
+    auto-detect, since a repo name is required query input, not a
+    credential; GITHUB_TOKEN only raises its rate limit, it doesn't
+    gate whether GitHubFetcher can be used at all.
 
     Args:
+        source: Which real source to use when not falling back to mock
+            — "reddit" (default) or "github". Wiring this into the CLI
+            /pipeline for GitHub is a separate, later task.
         force_mock: If True, always returns MockFetcher regardless of
-            config — e.g. for a CLI --mock flag (see src/pipeline/).
-            This is the sanctioned way to force mock mode; still never
-            construct MockFetcher directly outside this factory.
+            config or source — e.g. for a CLI --mock flag (see
+            src/pipeline/). This is the sanctioned way to force mock
+            mode; still never construct MockFetcher directly outside
+            this factory.
     """
-    if not force_mock and config.reddit_configured:
+    if force_mock:
+        return MockFetcher()
+    if source == "github":
+        return GitHubFetcher(config)
+    if config.reddit_configured:
         return RedditFetcher(config)
     return MockFetcher()

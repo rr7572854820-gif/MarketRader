@@ -78,6 +78,7 @@ pip install -r requirements.txt
 
 - **Gemini (required for real analysis):** free tier available — create a key at https://aistudio.google.com/apikey and set `GEMINI_API_KEY`.
 - **Reddit (optional):** leave blank to use built-in mock sample data instead of real Reddit posts. To use real data, create a script app at https://www.reddit.com/prefs/apps and set `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` / `REDDIT_USER_AGENT`.
+- **GitHub (optional, fetcher-layer only):** `GitHubFetcher` (`src/fetchers/github_fetcher.py`) fetches open issues + comments from a public repo via the GitHub REST API — no token required (60 req/hour, unauthenticated). Set `GITHUB_TOKEN` (a personal access token from https://github.com/settings/tokens) to raise that to 5000 req/hour. Not yet wired into `src/pipeline/runner.py` or the REST API — currently reachable only via `get_fetcher(config, source="github")`, added as a second data source ahead of TODO.md's original "prove Reddit end-to-end first" sequencing (see TODO.md and SESSION.md for that decision).
 
 **3. Verify your setup:**
 
@@ -101,6 +102,86 @@ python -m src.pipeline.runner --help
 Reports are saved to `output/` as Markdown, alongside a JSON summary of each run (posts fetched, AI calls made, duration, errors). `src/pipeline/runner.py` is the current, actively maintained entrypoint — other scripts under `src/` (`check_connections.py`, `fetch_preview.py`, `analyze_preview.py`) are narrower diagnostic tools for individual pipeline stages, kept for that purpose, not superseded replacements for the full pipeline.
 
 AI responses are cached by default (`.cache/ai_responses.json`, keyed by exact prompt) — re-running the pipeline over overlapping data reuses prior analysis instead of spending real Gemini quota again. Pass `--no-cache` to force fresh calls every time.
+
+## REST API
+
+`src/api/` exposes the same pipeline over HTTP, for anything that wants to call MarketRadar programmatically instead of via the CLI. It is a thin wrapper only — every request still goes through `Pipeline.run()`; the API never re-implements fetching, analysis, clustering, verification, or report rendering itself.
+
+**Run the server:**
+
+```
+uvicorn src.api.app:app --reload
+```
+
+Interactive docs (Swagger UI) are then available at `http://127.0.0.1:8000/docs`, and the raw OpenAPI schema at `http://127.0.0.1:8000/openapi.json`.
+
+**Endpoints:**
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/health` | Liveness + whether Gemini/Reddit are configured. Does not contact either. |
+| GET | `/version` | API name/version. |
+| POST | `/analyze` | Runs the real pipeline (real Reddit/Gemini if configured, mock fallback otherwise — same "auto" behavior as the CLI). May consume real API quota. |
+| POST | `/analyze/mock` | Same as `/analyze`, but forces fully offline mock mode regardless of `.env`. Zero cost, zero network calls — the same guarantee as `--mock` on the CLI. |
+| GET | `/reports` | Lists past runs (CLI and API runs together — both save to `output/`), newest first. |
+| GET | `/reports/{report_id}` | Full execution summary for one run, plus its saved Markdown report text if one exists. |
+| GET | `/download/{report_id}` | Downloads the saved Markdown report file for one run. |
+
+**Example: a free, offline analysis run**
+
+```
+curl -X POST http://127.0.0.1:8000/analyze/mock \
+  -H "Content-Type: application/json" \
+  -d '{"limit": 5, "report_format": "both"}'
+```
+
+Response (trimmed):
+
+```json
+{
+  "report_id": "20260731_120000",
+  "summary": {"succeeded": true, "posts_fetched": 5, "ai_calls_made": 0, "cache_hits": 0, "cache_misses": 0, "clusters_found": 0, "errors": []},
+  "report": {"executive_summary": "...", "top_opportunities": [], "project_health": {...}}
+}
+```
+
+(`/analyze/mock` always produces zero opportunities — `MockAIProvider`'s placeholder text is deliberately never valid JSON, so nothing extracts. Use `/analyze` with a real `GEMINI_API_KEY` configured for a real result.)
+
+**Example: a real run against a subreddit**
+
+```
+curl -X POST http://127.0.0.1:8000/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"subreddit": "startups", "keyword": "invoicing", "limit": 10, "use_cache": true, "report_format": "both"}'
+```
+
+**Example: retrieving a past report**
+
+```
+curl http://127.0.0.1:8000/reports
+curl http://127.0.0.1:8000/reports/20260731_120000
+curl http://127.0.0.1:8000/download/20260731_120000 -o report.md
+```
+
+`limit` is capped at 100 requests per call through the API (the CLI has no such cap — a human typing a command can see the consequences; a network-facing endpoint can't assume that). Invalid input (an out-of-range `limit`, a blank `subreddit`, an unrecognized `report_format`) returns `422` with a structured error body; an unknown `report_id` returns `404`. See SESSION.md's Task 10 entry for the full architecture review, including known limitations.
+
+## Dashboard
+
+`dashboard/` is a Next.js (App Router, TypeScript, Tailwind, shadcn/ui) web UI over the REST API — a visual alternative to the CLI and raw `curl`, not a replacement for either. It talks to the backend exclusively over HTTP through one client module (`dashboard/src/lib/api/client.ts`); it never re-implements fetching, analysis, clustering, verification, or report generation.
+
+**Run it** (with the API already running per the REST API section above):
+
+```
+cd dashboard
+npm install
+npm run dev
+```
+
+Then open `http://localhost:3000`. Four pages: **Home** (run an analysis — subreddit, keyword, limit, cache/mock toggles, live loading state, graceful error display), **Reports** (every past run, searchable by ID, sortable by newest/oldest), **Report Details** (executive summary, per-opportunity score/confidence/verification rate/quotes/segment/next action, plus three charts — Top Pain Points, Opportunity Scores, Verification Distribution, via Recharts), and **Settings** (API base URL override, connection test, default mock-mode preference). Dark mode and full responsiveness are built in throughout.
+
+By default it points at `http://127.0.0.1:8000` (override via `NEXT_PUBLIC_API_BASE_URL` in `dashboard/.env.local`, copied from `.env.local.example`, or per-browser from the Settings page — handy for pointing at a non-default port without a rebuild).
+
+One real limitation worth knowing up front: `GET /reports/{id}` (used by the Reports page) only ever returns a saved run's execution summary plus its raw Markdown text, never a JSON form of the structured report — the pipeline doesn't persist one. The Report Details page reconstructs the per-opportunity cards and charts by parsing that Markdown when you're not looking at a report you *just* ran in the same browser tab (which does have the real structured data, cached client-side). See SESSION.md's Task 11 entry for the full reasoning and its limits.
 
 ---
 
