@@ -47,6 +47,46 @@ Ideas worth considering later, explicitly not committed to now.
 
 ## Session Log
 
+## Session — 2026-08-01 (Smart adaptive oversampling: calculate_fetch_limit)
+
+### Current Objective
+Replace the flat 3x oversampling multiplier (added earlier this same session for `PipelineConfig.num_reports`) with a tiered, request-size-aware `calculate_fetch_limit()` formula - smaller multiplier for larger requests, absolute hard cap of 200.
+
+### Completed Work
+- Two premises in the task didn't match the codebase, confirmed by reading the referenced files before writing code (per the task's own explicit instruction to do so): `PROMPT_RULES.md` doesn't exist; `Pipeline.run()`'s design already has a separate, tested `num_reports` field distinct from `post_limit`/`limit` (an explicit decision from earlier this session, made via `AskUserQuestion` specifically to avoid this exact ambiguity), and the task's `user_requested = config.limit` would have silently reversed that decision. Surfaced this via `AskUserQuestion` before implementing; user confirmed: keep `num_reports` as the report-count field, swap in `calculate_fetch_limit()` as its fetch-sizing formula (replacing the flat 3x), `post_limit` stays the untouched absolute safety ceiling.
+- `calculate_fetch_limit(requested: int) -> int` added to `src/pipeline/pipeline.py` (module-level, public) - implemented exactly per the given tiered multiplier/hard-cap table, verified by hand against every one of the task's own worked examples before writing tests (all internally consistent). Raises `ValueError` for `requested < 1`.
+- `_initial_fetch_limit()` now calls `calculate_fetch_limit(num_reports)` instead of the old flat `3 * num_reports`, still `min(..., post_limit)` - `post_limit` remains the hard ceiling in every case, unchanged from the prior design.
+- Added the two requested log lines: "User requested N report(s). Fetching M discussion(s)..." (info) and a large-request warning, plus a "Note: Only X of Y requested reports passed quality verification" log at the point `top_opportunities` gets capped (this generalizes a narrower log that only fired inside the oversample-round path before).
+- **Deliberately changed `PipelineExecutionSummary.clusters_found`'s meaning** for GitHub `num_reports` runs, per this task's explicit test #10 (`response.clusters == 5` for a capped deliverable): now reflects `len(insight_report.top_opportunities)` (the delivered/capped count) rather than the full uncapped cluster count. `InsightReport.project_health.total_opportunity_clusters` (inside the report body) still reports the full analysis breadth untouched - the two fields now deliberately diverge for a capped run, each serving a different purpose. Updated 2 pre-existing tests (from earlier this session) whose assertions depended on the old, now-superseded meaning.
+- **Found and reported, not silently "fixed," a real inconsistency in the task itself**: `calculate_fetch_limit(150) = 165` (verified by hand and by running the real formula), not `200` as the task's own "Test C" expects - 150 is in the `>100` tier (multiplier 1.1, cap 200) and `int(150 * 1.1) = 165 < 200`. The task's own separately-stated edge case ("requested > 200 -> hard cap + warning") independently confirms 150 shouldn't hit the cap either. Implemented the formula and the warning threshold exactly as given (both self-consistent with each other and every other worked example), ran Test C literally as specified, and reported the real, correct output (165, no warning) rather than special-casing 150 to produce 200.
+- 11 new tests in `tests/test_pipeline.py` (10 requested + 1 extra `ValueError` edge case) - including a `_PartialExtractionAIProvider` test double (extraction succeeds for the first N calls, then produces a syntactically-valid-but-unverifiable-quote response for the rest) to deterministically model "N discussions fetched, only M pass quality filtering" without relying on real AI variability. `test_pipeline_large_request_warning` uses `num_reports=250` (not the task's own 150 example, for the reason above). Full suite 198 -> **209**, zero existing tests broken (after updating the 2 assertions affected by the deliberate `clusters_found` semantics change above).
+- **Live-verified all 3 required tests against real Groq + real GitHub, not mocked**:
+  - Test A (`keyword="invoicing"`, `num_reports=5`): `Fetching 15 discussion(s)` (calculate_fetch_limit(5)=15, correct), 5 clusters delivered.
+  - Test B (`keyword="authentication"`, `num_reports=20`): `Fetching 40 discussion(s)` (calculate_fetch_limit(20)=40, correct), 6 real clusters delivered (real GitHub/Groq data genuinely clustered 40 discussions down to 6 distinct pain points - honest, not fabricated up to 20).
+  - Test C (`keyword="developer tools"`, `num_reports=150`): `Fetching 165 discussion(s)` (matches the real formula, not the task's stated 165≠200 expectation - see above), then hit a real GitHub rate-limit (unrelated to this task - accumulated unauthenticated API usage from this session's own repeated live testing, no `GITHUB_TOKEN` configured locally) - retried 3x as designed, recorded the error, returned `succeeded=True` with an empty report rather than crashing. Confirms existing fetch-retry/graceful-degradation behavior works correctly under a real failure, as a side effect of this verification.
+
+### Known Issues / Named Limitations
+- The task's own "Test C" (`limit=150` -> expects "Fetching 200 discussions" + a large-request warning) does not match `calculate_fetch_limit()`'s own defined formula or its own separately-stated `>200` edge-case rule - implemented and tested the formula as actually, consistently specified; flagged rather than silently reconciled by special-casing one input value.
+- `PipelineExecutionSummary.clusters_found` and `InsightReport.project_health.total_opportunity_clusters` now intentionally report different numbers for a capped GitHub `num_reports` run (delivered count vs. full analysis breadth) - a real, deliberate semantic split introduced this session, not documented anywhere a future session would find it except this entry and the inline comments at both call sites.
+- No `GITHUB_TOKEN` is configured locally - this session's own repeated live verification (Tests A/B/C here, plus earlier CORS/keyword-extraction verification) exhausted the unauthenticated 60/hour GitHub rate limit, which is what caused Test C's fetch failure. Not a code bug; worth adding a token before further live GitHub testing this session.
+
+### Important Decisions
+- Confirmed with the user via `AskUserQuestion` before touching any code: `calculate_fetch_limit()` replaces the fetch-sizing *formula* only, wired to the existing `num_reports` field - does not reopen or reverse the `limit`/`num_reports` split decided earlier this session.
+- Changed what `clusters_found` means for a capped run (see Completed Work) - a real, load-bearing behavior change made to satisfy this task's own explicit test, not a side effect; the two existing tests it broke were updated with clear comments explaining why, not silently patched to pass.
+
+### Next Tasks
+- Consider documenting the `clusters_found` vs. `total_opportunity_clusters` split in `ENGINEERING_GUIDE.md` §10 (Backend API Architecture) or PipelineConfig's own docstring cluster - currently only in code comments and this entry.
+- Add `GITHUB_TOKEN` to `.env` before further live GitHub verification this session, to avoid repeating Test C's rate-limit failure.
+
+### Questions
+None new.
+
+### Lessons Learned
+- When a task provides both a general formula and specific worked examples, verify the examples against the formula by hand before implementing - this session's earlier task (GitHub search rewrite) had internally consistent examples; this one's Test C did not, and catching that before writing tests (rather than after a confusing test failure) saved a debugging detour.
+- A task that asks to "add" a feature can actually be asking to *replace* an existing, working, previously-approved mechanism - checking against `SESSION.md`/prior decisions before assuming "add" means "add a separate thing" is worth the extra read every time.
+
+---
+
 ## Session — 2026-08-01 (Production CORS fix, Groq model fix, GitHub search rewrite, natural-language keyword extraction)
 
 ### Current Objective

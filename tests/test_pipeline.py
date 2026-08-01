@@ -27,7 +27,13 @@ from src.fetchers.base import Fetcher, FetcherError
 from src.fetchers.mock_fetcher import MockFetcher
 from src.fetchers.reddit_fetcher import RedditFetcher
 from src.models import FetchedPost, FetchQuery
-from src.pipeline.pipeline import Pipeline, PipelineConfig, _CountingAIProvider, _fetch_with_retry
+from src.pipeline.pipeline import (
+    Pipeline,
+    PipelineConfig,
+    _CountingAIProvider,
+    _fetch_with_retry,
+    calculate_fetch_limit,
+)
 
 
 def make_config(reddit_configured: bool = False, gemini_configured: bool = False) -> Config:
@@ -222,6 +228,198 @@ def test_pipeline_does_not_extract_search_terms_for_reddit_source(tmp_path: Path
     assert captured["fetch_keyword"] == "invoice automation problems"
 
 
+# --- Adaptive fetch-limit calculation (calculate_fetch_limit) -----------------------
+
+
+def test_calculate_fetch_limit_small():
+    assert calculate_fetch_limit(5) == 15
+    assert calculate_fetch_limit(10) == 30
+
+
+def test_calculate_fetch_limit_medium():
+    assert calculate_fetch_limit(11) == 22
+    assert calculate_fetch_limit(30) == 60
+
+
+def test_calculate_fetch_limit_large():
+    assert calculate_fetch_limit(31) == 46
+    assert calculate_fetch_limit(50) == 75
+
+
+def test_calculate_fetch_limit_xlarge():
+    assert calculate_fetch_limit(51) == 63
+    assert calculate_fetch_limit(100) == 125
+
+
+def test_calculate_fetch_limit_hardcap():
+    assert calculate_fetch_limit(101) == 111
+    assert calculate_fetch_limit(500) == 200
+    assert calculate_fetch_limit(1000) == 200
+
+
+def test_calculate_fetch_limit_rejects_non_positive():
+    with pytest.raises(ValueError):
+        calculate_fetch_limit(0)
+
+
+class _PartialExtractionAIProvider(AIProvider):
+    """Models "N discussions fetched, only M pass quality filtering"
+    deterministically: the first `passing` extraction calls get real,
+    quote-verified MockAIProvider output; every extraction call after
+    that gets a syntactically-valid response whose evidence_quote is
+    NOT a substring of the source text, which Extractor's own
+    verified-quote guardrail rejects (InsightExtractionError) - the
+    same real rejection path a genuinely low-quality AI response would
+    hit, not a shortcut around it. Clustering always makes one
+    singleton cluster per surviving insight, same as MockAIProvider's
+    own clustering response.
+    """
+
+    def __init__(self, passing: int) -> None:
+        self._passing = passing
+        self._extraction_calls = 0
+        self._mock = MockAIProvider()
+
+    def check_connection(self) -> None:
+        return
+
+    def generate_text(self, prompt: str) -> str:
+        if 'Discussion text:\n"""' in prompt:
+            self._extraction_calls += 1
+            if self._extraction_calls <= self._passing:
+                return self._mock.generate_text(prompt)
+            return json.dumps(
+                {
+                    "primary_pain_point": {
+                        "description": "unverifiable",
+                        "evidence_quote": "this exact sentence is not present anywhere in the source text",
+                    },
+                    "secondary_pain_points": [],
+                    "user_persona": "unverifiable",
+                    "feature_requests": [],
+                    "buying_signals": [],
+                    "emotional_sentiment": "Neutral",
+                    "urgency_score": 1,
+                    "opportunity_score": 1,
+                    "confidence": "Weak",
+                    "startup_opportunity": "unverifiable",
+                    "supporting_evidence": [],
+                }
+            )
+        return self._mock.generate_text(prompt)  # clustering: MockAIProvider's own singleton-per-index behavior
+
+
+def test_pipeline_uses_calculated_limit(tmp_path: Path, monkeypatch):
+    fetcher = _AvailablePostsFetcher(available=20)
+    _patch_github_fetch_and_clustering(monkeypatch, fetcher, MockAIProvider())
+
+    config = PipelineConfig(
+        source="github",
+        keyword="invoicing",
+        post_limit=50,
+        num_reports=5,
+        output_dir=tmp_path,
+        ai_provider="mock",
+        cache_path=tmp_path / "ai_cache.json",
+    )
+    Pipeline(config).run()
+
+    assert fetcher.calls[0] == 15  # calculate_fetch_limit(5)
+
+
+def test_pipeline_trims_to_requested(tmp_path: Path, monkeypatch):
+    """15 discussions fetched, 8 pass extraction/quality filtering,
+    user requested 5 - more than enough survived, so the deliverable
+    is trimmed to exactly 5.
+    """
+    fetcher = _AvailablePostsFetcher(available=15)
+    _patch_github_fetch_and_clustering(monkeypatch, fetcher, _PartialExtractionAIProvider(passing=8))
+
+    config = PipelineConfig(
+        source="github",
+        keyword="invoicing",
+        post_limit=50,
+        num_reports=5,
+        output_dir=tmp_path,
+        ai_provider="mock",
+        cache_path=tmp_path / "ai_cache.json",
+    )
+    result = Pipeline(config).run()
+
+    assert fetcher.calls == [15]  # 8 >= 5 requested, so no oversample round needed
+    assert len(result.report.top_opportunities) == 5
+
+
+def test_pipeline_handles_fewer_than_requested(tmp_path: Path, monkeypatch):
+    """15 discussions fetched, only 3 pass extraction/quality
+    filtering, user requested 5 - fewer survived than requested; the
+    pipeline must still succeed (not crash/raise) and honestly return
+    the 3 that are genuinely available, never fabricating 2 more.
+    """
+    fetcher = _AvailablePostsFetcher(available=15)
+    _patch_github_fetch_and_clustering(monkeypatch, fetcher, _PartialExtractionAIProvider(passing=3))
+
+    config = PipelineConfig(
+        source="github",
+        keyword="invoicing",
+        post_limit=50,
+        num_reports=5,
+        output_dir=tmp_path,
+        ai_provider="mock",
+        cache_path=tmp_path / "ai_cache.json",
+    )
+    result = Pipeline(config).run()  # must not raise
+
+    assert result.summary.succeeded is True
+    assert len(result.report.top_opportunities) == 3
+
+
+def test_pipeline_large_request_warning(tmp_path: Path, monkeypatch, caplog):
+    """The task's own edge-case spec ties the "large request" warning
+    to `requested > 200` (calculate_fetch_limit's absolute hard cap),
+    not to a specific example value - verified with 250 here, since
+    150 (the task's own "Test C" example) does not actually exceed 200
+    and therefore does not trigger this path under the given formula;
+    see this task's completion report for that discrepancy.
+    """
+    fetcher = _AvailablePostsFetcher(available=300)
+    _patch_github_fetch_and_clustering(monkeypatch, fetcher, MockAIProvider())
+
+    config = PipelineConfig(
+        source="github",
+        keyword="developer tools",
+        post_limit=300,
+        num_reports=250,
+        output_dir=tmp_path,
+        ai_provider="mock",
+        cache_path=tmp_path / "ai_cache.json",
+    )
+    with caplog.at_level("WARNING", logger="src.pipeline.pipeline"):
+        Pipeline(config).run()
+
+    assert fetcher.calls[0] == 200  # calculate_fetch_limit's absolute hard cap
+    assert any("Large request" in record.message for record in caplog.records)
+
+
+def test_pipeline_stats_show_fetch_limit(tmp_path: Path, monkeypatch):
+    fetcher = _AvailablePostsFetcher(available=20)
+    _patch_github_fetch_and_clustering(monkeypatch, fetcher, MockAIProvider())
+
+    config = PipelineConfig(
+        source="github",
+        keyword="invoicing",
+        post_limit=50,
+        num_reports=5,
+        output_dir=tmp_path,
+        ai_provider="mock",
+        cache_path=tmp_path / "ai_cache.json",
+    )
+    result = Pipeline(config).run()
+
+    assert result.summary.posts_fetched == 15  # calculate_fetch_limit(5)
+    assert result.summary.clusters_found == 5  # delivered/capped count
+
+
 # --- GitHub report-count reliability (PipelineConfig.num_reports) -------------------
 
 
@@ -320,7 +518,11 @@ def test_num_reports_initial_fetch_requests_oversample_multiplier(tmp_path: Path
 
     assert fetcher.calls == [9]  # 3x num_reports, not post_limit
     assert result.summary.succeeded is True
-    assert result.summary.clusters_found == 9  # full analysis breadth, unmerged mock clustering
+    # clusters_found reflects the delivered/capped count (3), not the
+    # full 9 found - see run()'s summary construction comment: this
+    # differs from posts_fetched/posts_analyzed, which do report the
+    # full analysis breadth; InsightReport.project_health still does too.
+    assert result.summary.clusters_found == 3
     assert len(result.report.top_opportunities) == 3  # surfaced deliverable capped to what was requested
 
 
@@ -347,7 +549,7 @@ def test_num_reports_returns_requested_count_when_data_is_sufficient(tmp_path: P
     assert fetcher.calls == [15, 50]  # round 1 (3x5, short after merging) + one oversample round at post_limit
     assert result.summary.succeeded is True
     assert result.summary.posts_fetched == 40  # merged/deduplicated across both rounds, not 15+40
-    assert result.summary.clusters_found == 10  # ceil(40/4) - full analysis breadth
+    assert result.summary.clusters_found == 5  # delivered/capped count, not the full ceil(40/4)=10 found
     assert len(result.report.top_opportunities) == 5  # exactly what was requested
 
 

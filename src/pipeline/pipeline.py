@@ -54,19 +54,58 @@ logger = logging.getLogger(__name__)
 _FETCH_MAX_ATTEMPTS = 3
 _FETCH_BASE_DELAY_SECONDS = 1.0
 
-# GitHub-only report-count reliability (PipelineConfig.num_reports): how
-# many discussions to request per requested report. Not every discussion
-# survives extraction/verification/dedup into a distinct cluster, so the
-# first fetch deliberately over-requests by this multiple; Pipeline.run()
-# allows exactly one further fetch round beyond that (by construction -
+# GitHub-only report-count reliability (PipelineConfig.num_reports):
+# calculate_fetch_limit() decides how many discussions to request on
+# the first fetch for a given number of requested reports. Not every
+# discussion survives extraction/verification/dedup into a distinct
+# cluster, so the first fetch deliberately over-requests - by a
+# multiplier that shrinks as the request grows, since the *relative*
+# oversampling headroom needed to reliably clear N valid clusters
+# doesn't scale linearly with N. Pipeline.run() allows exactly one
+# further fetch round beyond that (by construction -
 # _oversample_for_report_count has exactly one call site, not a loop)
 # before honestly returning fewer than requested. An unbounded retry
 # loop would risk exactly the runaway AI-provider cost / GitHub
-# rate-limit exposure that post_limit's own 100-item cap (see
-# src/api/models.py) exists to prevent - post_limit remains the
-# absolute ceiling in every case; this multiplier only ever narrows how
-# much of that ceiling gets used on the first fetch, never widens it.
-_OVERSAMPLE_MULTIPLIER = 3
+# rate-limit exposure that post_limit's own 100-item API-layer cap
+# (see src/api/models.py) exists to prevent - post_limit remains the
+# absolute ceiling in every case; calculate_fetch_limit()'s own
+# _FETCH_LIMIT_HARD_CAP (200) is a second, independent ceiling on top
+# of that, relevant only when PipelineConfig is constructed directly
+# (CLI/tests) with a num_reports value the API layer itself could
+# never produce (capped at 100 there).
+_FETCH_LIMIT_HARD_CAP = 200
+
+
+def calculate_fetch_limit(requested: int) -> int:
+    """Adaptive oversampling based on request size.
+
+    Always fetches more than requested to guarantee N verified reports
+    after quality filtering. Never fetches so many that it hits API
+    limits or causes unacceptable response times - the multiplier
+    shrinks as `requested` grows (3x for small requests down to 1.1x
+    for large ones), and _FETCH_LIMIT_HARD_CAP (200) is an absolute
+    ceiling no request can push past.
+
+    Raises:
+        ValueError: If requested < 1 - there is nothing meaningful to
+            oversample for a non-positive report count.
+    """
+    if requested < 1:
+        raise ValueError("Limit must be at least 1")
+
+    if requested <= 10:
+        multiplier, hard_cap = 3.0, 30
+    elif requested <= 30:
+        multiplier, hard_cap = 2.0, 60
+    elif requested <= 50:
+        multiplier, hard_cap = 1.5, 75
+    elif requested <= 100:
+        multiplier, hard_cap = 1.25, 125
+    else:
+        multiplier, hard_cap = 1.1, _FETCH_LIMIT_HARD_CAP
+
+    calculated = int(requested * multiplier)
+    return min(calculated, hard_cap)
 
 
 @dataclass(frozen=True)
@@ -107,16 +146,20 @@ class PipelineConfig:
             (Reddit's fetch mechanism doesn't support the same
             oversample-and-retry approach; see pipeline.py's
             _initial_fetch_limit). When set: the first fetch requests
-            roughly 3x this many discussions rather than post_limit
-            outright (still capped at post_limit - that cap is never
-            exceeded); if still short of num_reports clusters
+            calculate_fetch_limit(num_reports) discussions rather than
+            post_limit outright - a tiered multiplier (3x for small
+            requests down to 1.1x for large ones, absolute-capped at
+            200) rather than a flat multiple, still never exceeding
+            post_limit; if still short of num_reports clusters
             afterward, one further fetch up to post_limit is made
             before giving up; and the final report's top_opportunities
             is capped to exactly num_reports entries (top-ranked -
             Aggregator already sorts by score), while project_health
             and the executive summary still describe everything
-            actually analyzed, not just the capped slice. Returning
-            fewer than num_reports is expected and correct, not an
+            actually analyzed, not just the capped slice (though
+            PipelineExecutionSummary.clusters_found does reflect the
+            capped, delivered count - see run()'s summary construction).
+            Returning fewer than num_reports is expected and correct, not an
             error, whenever post_limit or genuinely-available
             discussions run out first - this never fabricates
             additional reports to hit the requested count.
@@ -281,6 +324,19 @@ class Pipeline:
             # "community" print something meaningful for a GitHub run.
             community = search_keyword or "" if self._config.source == "github" else self._config.subreddit
             initial_limit = self._initial_fetch_limit()
+            if self._config.source == "github" and self._config.num_reports:
+                logger.info(
+                    "User requested %d report(s). Fetching %d discussion(s) to guarantee quality after verification.",
+                    self._config.num_reports,
+                    initial_limit,
+                )
+                if self._config.num_reports > _FETCH_LIMIT_HARD_CAP:
+                    logger.warning(
+                        "Large request (%d reports). Fetching maximum %d discussions. Consider splitting "
+                        "into smaller requests for faster results.",
+                        self._config.num_reports,
+                        _FETCH_LIMIT_HARD_CAP,
+                    )
             query = FetchQuery(community=community, keyword=search_keyword, limit=initial_limit)
 
             posts = self._fetch(fetcher, query, errors)
@@ -300,6 +356,13 @@ class Pipeline:
 
             insight_report = generate_report(clusters, verification_report, posts, ai_provider_label)
             if self._config.source == "github" and self._config.num_reports:
+                if len(insight_report.top_opportunities) < self._config.num_reports:
+                    logger.info(
+                        "Note: Only %d of %d requested reports passed quality verification. "
+                        "Showing best available results.",
+                        len(insight_report.top_opportunities),
+                        self._config.num_reports,
+                    )
                 # Cap the surfaced deliverable to exactly what was
                 # requested, top-ranked first (Aggregator already
                 # sorts by score - see its aggregate()) - but only
@@ -329,7 +392,16 @@ class Pipeline:
             ai_calls_made=ai_calls_made,
             cache_hits=cache_hits,
             cache_misses=cache_misses,
-            clusters_found=len(clusters),
+            # len(insight_report.top_opportunities), not len(clusters):
+            # identical for every run except a GitHub num_reports run,
+            # where top_opportunities is deliberately capped to what
+            # was requested (see above) - this summary stat reflects
+            # what's actually delivered, while
+            # InsightReport.project_health.total_opportunity_clusters
+            # (inside the report body itself) still reports the full,
+            # uncapped analysis breadth. insight_report is only None in
+            # the total-failure case, where clusters is already [].
+            clusters_found=len(insight_report.top_opportunities) if insight_report is not None else len(clusters),
             errors=errors,
             report_path=report_path,
             succeeded=succeeded,
@@ -352,11 +424,13 @@ class Pipeline:
     def _initial_fetch_limit(self) -> int:
         """post_limit for every run except a GitHub run with
         num_reports set, where the first fetch instead requests
-        _OVERSAMPLE_MULTIPLIER discussions per requested report -
-        never more than post_limit, which stays the hard ceiling.
+        calculate_fetch_limit(num_reports) discussions - never more
+        than post_limit, which stays the hard ceiling regardless of
+        what calculate_fetch_limit's own tiered multiplier/cap would
+        otherwise allow.
         """
         if self._config.source == "github" and self._config.num_reports:
-            return min(_OVERSAMPLE_MULTIPLIER * self._config.num_reports, self._config.post_limit)
+            return min(calculate_fetch_limit(self._config.num_reports), self._config.post_limit)
         return self._config.post_limit
 
     def _should_oversample(self, clusters: List[OpportunityCluster], fetched_limit: int) -> bool:
