@@ -17,6 +17,18 @@ facing endpoint can be hit programmatically with no such safeguard, so
 an explicit upper bound is a deliberate, API-specific safety rail
 against an accidental huge Gemini bill or a very long blocking request,
 not a restriction pipeline.py itself imposes.
+
+`source` (added when GitHubFetcher was wired end-to-end): mirrors
+PipelineConfig's own source field - see src/pipeline/pipeline.py.
+`subreddit` keeps its "all"/non-blank default and validation unchanged
+for source="reddit"; it's simply ignored when source="github", the same
+way it was already ignored against mock data.
+
+`repo` was removed (GitHubFetcher's own repo-discovery feature, see
+src/fetchers/github_fetcher.py's module docstring): a GitHub request no
+longer names an exact repository - `keyword` alone drives both GitHub's
+Search API (to find repos) and the existing post-fetch filter, so it is
+now required, not optional, when source="github".
 """
 
 from __future__ import annotations
@@ -24,18 +36,20 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from src.insights.models import ConfidenceLevel
 
 ReportFormat = Literal["terminal", "markdown", "both"]
+Source = Literal["reddit", "github"]
 
 
 class AnalyzeRequest(BaseModel):
     keyword: Optional[str] = Field(
-        default=None, description="Only include posts/comments containing this keyword (case-insensitive). Blank/whitespace-only is treated as no filter, same as the CLI."
+        default=None, description="Only include posts/comments containing this keyword (case-insensitive). Blank/whitespace-only is treated as no filter for Reddit, same as the CLI - but required when source='github', where it also drives repo discovery."
     )
-    subreddit: str = Field(default="all", min_length=1, description="Subreddit to fetch from, without 'r/'. Ignored against mock data but still validated.")
+    subreddit: str = Field(default="all", min_length=1, description="Subreddit to fetch from, without 'r/'. Ignored when source='github' or against mock data, but still validated.")
+    source: Source = Field(default="reddit", description="Which Fetcher to use - 'reddit' (default) or 'github'.")
     limit: int = Field(default=25, ge=1, le=100, description="Maximum posts to fetch. Capped at 100 for this API (see module docstring).")
     use_cache: bool = Field(default=True, description="Reuse cached AI responses for identical prompts. Same semantics as the CLI's --no-cache when set to false.")
     report_format: ReportFormat = Field(default="both", description="'terminal' returns the report in the response only; 'markdown' saves a file only; 'both' does both.")
@@ -55,6 +69,12 @@ class AnalyzeRequest(BaseModel):
             return None
         stripped = value.strip()
         return stripped or None
+
+    @model_validator(mode="after")
+    def _require_keyword_for_github_source(self) -> "AnalyzeRequest":
+        if self.source == "github" and not self.keyword:
+            raise ValueError("keyword is required for GitHub source")
+        return self
 
 
 class OpportunityEntryModel(BaseModel):

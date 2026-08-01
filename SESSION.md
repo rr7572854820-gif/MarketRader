@@ -47,6 +47,144 @@ Ideas worth considering later, explicitly not committed to now.
 
 ## Session Log
 
+## Session — 2026-07-31 (Add GroqProvider as a second AI provider)
+
+### Current Objective
+Add Groq as a real, selectable AI provider, following the exact `AIProvider`/factory pattern `GeminiProvider` already established, with Groq taking priority over Gemini when both are configured.
+
+### Completed Work
+- Confirmed exact interface/factory reality before writing code, per this task's own instruction: `src/ai/factory.py` doesn't exist (the real factory is `src/ai/__init__.py`'s `get_ai_provider()`) - same recurring pattern-mismatch as prior tasks. `AIProvider` has exactly two abstract methods (`check_connection`, `generate_text`), one exception (`AIProviderError`).
+- Installed the real `groq` package (not present before) and inspected its actual exception hierarchy directly (`groq.AuthenticationError`/`RateLimitError` subclass `APIStatusError`, which carries a real `.status_code`; `APIConnectionError`/`APITimeoutError` for network issues) rather than guessing - same discipline `GeminiProvider`'s `_is_retryable` already used for `google-genai`.
+- **`src/ai/exceptions.py`** (new): `AIProviderAuthError`/`AIProviderRateLimitError`, both subclasses of the existing single `AIProviderError` - mirrors `src/fetchers/exceptions.py`'s precedent exactly, preserving the "catch one type" convention this project uses everywhere.
+- **`src/ai/groq_provider.py`** (new): `GroqProvider(AIProvider)`, model hardcoded to `"llama3-8b-8192"` per the task's explicit choice (not a config field, unlike Gemini's configurable model - not asked for). `generate_text()` maps 401→`AIProviderAuthError("Groq API key is invalid.")` and 429→`AIProviderRateLimitError("Groq rate limit exceeded.")` immediately (no retry - a direct 1:1 status-to-exception mapping per the task spec, and keeps tests fast), retries only genuinely transient failures (5xx, network) with the same exponential-backoff shape as `GeminiProvider`, and raises generic `AIProviderError(f"Groq error: {status}")` for anything else. `check_connection()` lists models (no generation quota spent), same as Gemini.
+- **`src/ai/__init__.py`**: `get_ai_provider()`'s priority is now **Groq → Gemini → Mock** (`force_mock` still wins over everything, checked first). Documented as a stated default, not a quality judgment between models.
+- **`src/config.py`**: `groq_api_key`/`groq_configured` added, same defaulted-field pattern as `github_token` (keeps every existing `Config(...)` call site working unchanged).
+- **`.env`**: `GROQ_API_KEY` was already present with what looks like a real key - the user had added it directly (visible in the IDE-opened file) before this task ran. Did not fabricate or overwrite it; did not print its value anywhere.
+- **`.env.example`**: added a blank `GROQ_API_KEY=` line with setup instructions, same pattern as every other credential.
+- **`requirements.txt`**: added `groq>=1.6` - not in this task's literal boundary list, but the same necessary-minimal-deviation reasoning as `requests` (GitHubFetcher) and `httpx` (Task 10) before it: a direct import needs to be declared, not left to work only because it happens to be installed.
+- **`tests/ai/test_groq_provider.py`** (new): 10 tests - the 5 requested (valid response, invalid key, rate limit, factory-selects-Groq, factory-falls-back-to-Gemini) plus 5 more (generic error status, empty response, successful connection check, factory-falls-back-to-mock-when-neither-configured, force-mock-overrides-Groq). All Groq calls mocked via patching `src.ai.groq_provider.Groq`; zero real network calls, zero real API cost. Full suite: 174 → **184**, all passing, zero existing tests broken.
+
+### Known Issues / Named Limitations
+- **`src/check_connections.py` was not updated and is now factually wrong in a real scenario**: it hardcodes "Gemini" in its messages and gates its whole AI check on `config.gemini_configured` alone. A user with only a valid `GROQ_API_KEY` configured (no Gemini key) would see `[FAIL] Gemini not configured - set GEMINI_API_KEY in .env (this one is required)`, even though `get_ai_provider()` would correctly and silently return a working `GroqProvider`. Not fixed - `check_connections.py` wasn't in this task's boundaries ("only make the minimum changes required") - but flagged clearly since it actively misleads about an actually-working setup. See TODO.md.
+- No dedicated test proves the exponential-backoff retry path for Groq's 5xx/connection errors actually sleeps and retries the expected number of times (mirrors `GeminiProvider`, which also has no such test - neither provider's retry *timing* has ever been directly tested in this codebase, only its final outcome).
+
+### Important Decisions
+- Did not fabricate a placeholder Groq API key for `.env` despite the task's literal instruction ("use the actual key I provide") - no real key was ever included in the task text itself; a real one was separately already present in `.env` (added directly by the user), so nothing needed to be invented. Would have left the line blank and said so explicitly if it hadn't been.
+- Made 401/429 immediate and non-retried rather than retry-then-raise (which `GeminiProvider` does for its own 429 handling) - the task's error-handling section describes a direct 1:1 status-to-exception mapping, not a retry policy, and immediate failure keeps the new tests fast (no multi-second sleeps) without contradicting anything explicitly asked for.
+- Flagged, but did not fix, `check_connections.py`'s now-stale Gemini-only messaging - a real consequence of this task's own explicit priority-order requirement, but a distinct concern (diagnostic tooling accuracy) from "add GroqProvider," and outside this task's stated boundaries.
+
+### Next Tasks
+- Fix `src/check_connections.py` to be provider-agnostic (report whichever provider `get_ai_provider()` would actually select, not a hardcoded "Gemini") - flagged above and in TODO.md, not done here.
+
+### Questions
+None new.
+
+### Lessons Learned
+- When a task's instructions include "use the actual key I provide" but no key is actually present in the message, check whether it already exists elsewhere (here: the user had already added it to `.env` directly) before either fabricating one or stalling to ask - the real state of the repo settled the question without needing to interrupt.
+
+## Session — 2026-07-31 (Fix: GitHub analysis returning 0 discussions)
+
+### Current Objective
+Debug and fix a real, reported bug: a GitHub-source analysis run returned 0 fetched discussions.
+
+### Completed Work
+- Checked `.env`: `GITHUB_TOKEN` and `GEMINI_API_KEY` both present and non-empty (did not print either value). `GITHUB_TOKEN`'s length looked suspiciously short for a real token at first glance, but this turned out to be a red herring, ruled out by direct evidence below - not blindly trusted either way.
+- Added temporary, clearly-tagged (`# TEMP DEBUG`) logging to `src/fetchers/github_fetcher.py` (keyword received, repos discovered, per-repo fetch/issue counts, every swallowed exception) and `src/pipeline/pipeline.py` (source/keyword passed to the fetcher, post count returned).
+- The task's suggested `test_debug.py` used an API that doesn't exist in this codebase (`GitHubFetcher(keyword=..., limit=...)`, `from src.config import config`, `fetcher.fetch()` with no args) - corrected it to the real one (`GitHubFetcher(config)` from `load_config()`, `fetch(FetchQuery(...))`) before running.
+- **Ran it against the real GitHub API** (keyword="invoicing"): discovery worked perfectly - 5 real, correct repos found (`invoiceninja/invoiceninja`, `akaunting/akaunting`, `midday-ai/midday`, `idurar/idurar-erp-crm`, `crater-invoice-inc/crater`), every issue fetch succeeded (200 OK throughout, real token confirmed working), but the debug output showed `"5 post(s) before keyword filter, 0 after"` - **the post-fetch keyword filter was silently discarding every real result.**
+- **Root cause, confirmed with real evidence, not speculation**: the prior session's repo-discovery design reused `keyword` twice - once (correctly) as `discover_repos()`'s GitHub Search API query, and again as a manual substring filter over each fetched issue's title/body. Real invoicing-tool issues (e.g. "Fix PDF export," "E-Invoice / Certificate") don't repeat the literal word "invoicing," so a topically-perfect fetch still returned zero discussions. This exact tension had been named as a limitation in TODO.md/SESSION.md two sessions ago but not yet observed causing a real failure - it now has.
+- **Fix**: removed the redundant post-fetch filter from `GitHubFetcher.fetch()` entirely. Repo-level relevance from `discover_repos()`'s Search API query is the real filter; requiring an individual issue to also repeat the search term added nothing but false negatives. This aligns `GitHubFetcher` with `RedditFetcher`'s own existing precedent - `RedditFetcher` never re-filters its own fetched posts either, it delegates keyword relevance entirely to `subreddit.search(keyword)`. The manual-substring-filter pattern really only ever fit `MockFetcher` (which has no real search backend to delegate to); `GitHubFetcher` had copied it where it didn't belong.
+- **Re-verified against the real GitHub API after the fix**: same keyword, same repos, now returns **5 real discussions** (titles logged and inspected) instead of 0, in ~12s.
+- Removed all temporary debug logging from both files, deleted `test_debug.py`. `tests/fetchers/test_github_fetcher.py`'s `test_fetch_applies_keyword_filter_to_combined_results` (which asserted the old, buggy behavior) rewritten to `test_fetch_does_not_re_filter_issues_by_literal_keyword`, asserting the fixed behavior with a regression-test docstring naming the real incident. Full suite: 174 → **174** (same count, one test rewritten not added), all passing.
+- Updated TODO.md's previously-named "tension" entry to record that it was a confirmed real bug, not just a theoretical risk, and is now fixed.
+
+### Known Issues / Named Limitations
+- None new. This fix removes a real limitation named in the prior session rather than adding one.
+
+### Important Decisions
+- Did not touch `GITHUB_TOKEN` despite its unusual length once real evidence (successful 200 OK responses against the real GitHub API, using that exact token) proved it was valid - avoided "fixing" something that wasn't actually broken based on an assumption.
+- Fixed the root cause (removed the redundant filter) rather than a shallower patch (e.g. loosening the substring match, or falling back to "keep everything if the filter would zero out all results") - the deeper issue was that the filter shouldn't have existed at the issue level at all, given discovery already establishes repo-level relevance the same way `RedditFetcher`'s real search-API-backed fetch does.
+
+### Next Tasks
+None new from this session - the reported bug is fixed and verified.
+
+### Questions
+None.
+
+### Lessons Learned
+- A "known, named limitation" that hasn't yet been observed causing a real failure is still worth taking seriously - this one was flagged two sessions ago and materialized in production exactly as predicted. Naming a risk isn't the same as it being safe to leave.
+- When a task's own debug-script snippet doesn't match the real code's API, fix the script before running it rather than adapting the investigation around a broken reproduction - a corrected, real repro was what actually surfaced the bug here.
+
+## Session — 2026-07-31 (Automatic GitHub repo discovery by keyword)
+
+### Current Objective
+Replace GitHubFetcher's manual "owner/repo" input with automatic repo discovery: a user types a topic keyword (e.g. "invoicing"), and MarketRadar finds and fetches issues from the most relevant public repos itself, via GitHub's Search API.
+
+### Completed Work
+- Confirmed exact current field names/behavior before writing code, per this task's own instruction: `GitHubFetcher.fetch(query)` read `query.community` as the repo; `AnalyzeRequest` had `repo: Optional[str]`; `PipelineConfig` had a matching `repo` field; the dashboard had a "Repository" input with `owner/repo` format validation.
+- **`src/fetchers/github_fetcher.py`**: added `discover_repos(keyword, max_repos=5) -> List[str]`, using `GET /search/repositories` (`q="{keyword} in:name,description,topics"`, `sort=stars`, `order=desc`, `per_page=max_repos`), filtering out `archived`, `fork`, and zero-`open_issues_count` results; raises `FetcherError` if nothing survives. `fetch()` rewritten: requires `query.keyword` (raises `FetcherError` otherwise - there's no other way to know which repos to look at), calls `discover_repos()`, distributes `query.limit` evenly across discovered repos (`max(1, limit // len(repos))`), fetches each repo's issues with a per-repo try/except that **logs a warning and skips that repo** rather than propagating (per this task's explicit error-handling spec - a real, intentional behavior change from the single-explicit-repo design), raises `FetcherError` only if every discovered repo fails, then applies the same keyword as the existing post-fetch filter on the combined results. `_get_json` gained optional `rate_limit_message`/`invalid_message` overrides so the Search endpoint's 403/422 get their own distinct messages ("GitHub search rate limit exceeded." / "Invalid search keyword.") without duplicating the shared HTTP/status-code handling.
+- **`src/api/models.py`**: `repo` field removed entirely, along with its `_REPO_PATTERN` validator. The `model_validator` that previously required `repo` for `source="github"` now requires `keyword` instead. `keyword`'s own blank-means-no-filter normalization still runs first (field validator), so a whitespace-only keyword for GitHub correctly still fails the "required" check.
+- **`src/api/routes.py`**: dropped the now-nonexistent `repo=request.repo` pass-through.
+- **`src/pipeline/pipeline.py`**: `PipelineConfig.repo` removed. `Pipeline.run()`'s community computation changed from `repo if source=="github" else subreddit` to `keyword if source=="github" else subreddit` — `FetchQuery.community` is functionally unused by `GitHubFetcher` now (discovery is keyword-driven), this only keeps the field populated with something meaningful for log lines and keeps `subreddit`'s stale/ignored value from leaking through instead.
+- **Dashboard**: Repository input and its `owner/repo` format validation removed entirely from `analysis-form.tsx`. The Keyword field is now source-aware: required (with its own error state) when GitHub is selected, optional when Reddit is selected, with conditional placeholder/helper text ("MarketRadar will automatically find the most relevant GitHub repositories for this topic." for GitHub). `repo` removed from the TypeScript `AnalyzeRequest` type and both payload branches. `tsc`/`eslint` clean.
+- **Tests**: `tests/fetchers/test_github_fetcher.py` fully rewritten (repo-based tests no longer represent any real code path) around a new `_MockGitHubAPI` harness that routes a fake `requests.get` by URL shape (search vs. issues vs. comments) and records every call, so tests can assert on real request parameters (e.g. per-repo `per_page` distribution), not just outcomes - 18 tests total: the 9 requested (`test_discover_repos_returns_top5`, `_filters_archived`, `_filters_forks`, `_filters_no_issues`, `_no_results`, `test_fetch_uses_discovery`, `_distributes_limit`, `_skips_failed_repo`, `_all_repos_fail`) plus 9 more covering search-level 403/422 (stated in the error-handling spec but not in the enumerated list), the required-keyword guard, the keyword-filter-on-combined-results behavior, auth-header propagation across both search and issues calls, and field mapping - all now routed through discovery rather than a direct repo. Updated the two existing tests in `tests/test_api.py`/`tests/test_pipeline.py` from the prior session that referenced the now-removed `repo` field. Full suite: 168 → **174**, all passing, zero existing tests broken.
+- README.md updated: the GitHub setup bullet and REST API curl example both referenced `repo`/`owner-repo` input directly - both rewritten to show keyword-only usage.
+
+### Known Issues / Named Limitations
+- `discover_repos()` requests only `per_page=max_repos` candidates upfront, then filters that same small pool - a keyword whose top 5 results include several archived/forked/dead repos returns fewer than 5, never backfills from a larger pool. Implemented exactly as the task's literal params specified; flagged as a real tension between "request only 5" and "return top 5 after filtering."
+- A per-repo issue-fetch failure is now silently logged-and-skipped rather than raised - intentional per this task's spec, but it's a real behavior change: a caller can no longer distinguish "one repo had an auth/rate-limit problem" from "everything worked," short of reading logs.
+- The same keyword drives both repo discovery (matched against name/description/topics) and the final post-fetch filter (matched against each issue's literal title/body text) - a genuinely relevant issue in a correctly-discovered repo can still be dropped if it doesn't happen to contain the keyword text verbatim. Implemented exactly as specified in this task's STEP 2 flow; not resolved.
+- The CLI (`runner.py`) still has no `--source` flag - unchanged by this session.
+
+### Important Decisions
+- Fully rewrote `tests/fetchers/test_github_fetcher.py` rather than patching it - the fetch() signature's meaning changed fundamentally (no explicit repo input exists anymore), so every old test that passed `community="owner/repo"` as the primary input tested a code path that no longer exists, exactly matching this task's own "remove any test that requires manual repo input" instruction.
+- Added 9 tests beyond the 9 explicitly enumerated (search-level 403/422, required-keyword, keyword-filter-on-results, auth-header-across-both-endpoints, field-mapping) - the error-handling section of the task explicitly specifies behavior (search 403/422 handling) that the enumerated test list didn't include a check for; added coverage for every documented behavior, not just the named test names.
+- Kept `FetchQuery.community` populated (with `keyword`, not left blank) for a GitHub run even though `GitHubFetcher` doesn't use it - purely so log lines remain informative and `subreddit`'s stale default value can't leak through by omission.
+
+### Next Tasks
+- Wire `--source` into `runner.py` if CLI parity is wanted (still open from the prior session).
+- Consider whether `discover_repos()` should over-fetch (e.g. `per_page=15`) and truncate after filtering, if "fewer than 5 repos" turns out to matter in real use - not built without evidence it's a real problem, per this project's own "don't fix without measurement" norm.
+
+### Questions
+None new.
+
+### Lessons Learned
+- A task that changes what a field *means* (not just adds a field) can invalidate an entire existing test file's premise at once - worth checking test coverage holistically after this kind of change, not just adding the newly-requested tests on top of the old ones.
+
+## Session — 2026-07-31 (Wire GitHubFetcher end-to-end: API + dashboard)
+
+### Current Objective
+Make `source="github"` actually reachable through `POST /analyze` and the dashboard's analysis form — closing the gap the prior two sessions found and deliberately stopped at (`GitHubFetcher` existed and was fully tested, but nothing outside `get_fetcher()` itself could ever select it).
+
+### Completed Work
+- Verified the exact gap before writing code (per this task's own instruction): `AnalyzeRequest` (`src/api/models.py`) had no `source`/`repo` field, and even below that, `Pipeline.run()` (`src/pipeline/pipeline.py:187`) called `get_fetcher(app_config, force_mock=...)` with no `source` argument at all, despite the factory already supporting one. Two layers needed changes, not one.
+- **`src/api/models.py`**: `AnalyzeRequest` gained `source: Literal["reddit", "github"] = "reddit"` and `repo: Optional[str] = None`. A `field_validator` rejects a malformed `repo` (must match `owner/repo`, via `_REPO_PATTERN`); a `model_validator(mode="after")` rejects `source="github"` with no `repo` at all. Both surface as a standard FastAPI 422, consistent with every other validation rule already in this model.
+- **`src/pipeline/pipeline.py`**: `PipelineConfig` gained matching `source: str = "reddit"` and `repo: Optional[str] = None` fields (both defaulted, so every existing `PipelineConfig(...)` call site keeps working unchanged — same rule already established for `github_token` on `Config`). `Pipeline.run()` now passes `source=self._config.source` into `get_fetcher()`, and computes `FetchQuery.community` as `repo` when `source="github"`, `subreddit` otherwise.
+- **`src/api/routes.py`**: `_run_and_build_response()` passes `request.source`/`request.repo` into `PipelineConfig(...)`. This file wasn't named in the task's boundary list (`models.py`, `pipeline.py`, `factory.py`, `dashboard/` were), but without this one-line bridge the new `AnalyzeRequest` fields would be accepted and then silently discarded — the API would validate a GitHub request correctly and then still run it against Reddit. Flagged as a necessary, minimal addition rather than done silently.
+- **`src/fetchers/__init__.py`**: no change needed — `get_fetcher()`'s `source` parameter was already added in the prior GitHubFetcher session and just needed an actual caller.
+- **Dashboard** (`dashboard/src/components/analysis-form.tsx`, `dashboard/src/lib/api/types.ts`): added a Reddit/GitHub `Tabs` toggle (reusing the existing shadcn `Tabs` component, no new dependency). GitHub selected → "Repository" input replaces "Subreddit" (client-side format validation mirroring the backend's `_REPO_PATTERN`, same "UX nicety, API is the real enforcement" pattern already used for the subreddit/limit fields), Mock mode switch hidden (GitHub has no mock — `force_mock` always returns Reddit's `MockFetcher` regardless of `source`, confirmed by reading `src/fetchers/__init__.py` before assuming this), Keyword/Post limit/Use cache unchanged and shared across both. A GitHub submission always calls `POST /analyze` (never `/analyze/mock`), since there's no mock path to force. `AnalyzeRequest` (TypeScript) gained optional `source`/`repo`, and `subreddit` became optional to match the Reddit-only vs. GitHub-only payload shapes the task specified. `npx tsc --noEmit` and `npx eslint` both clean on the changed files.
+- **Tests**: added the three requested to `tests/test_api.py` (`test_analyze_github_missing_repo`, `test_analyze_github_invalid_repo_format`, `test_analyze_github_valid`) plus two to `tests/test_pipeline.py` proving the deeper wiring the API-level test alone can't: `test_pipeline_passes_source_to_get_fetcher_and_repo_as_fetch_query_community` and `test_pipeline_defaults_to_reddit_source_and_subreddit_as_community`, both by monkeypatching `get_fetcher` itself (not just stubbing `Pipeline`) to capture the real call arguments `Pipeline.run()` produces. This distinction mattered: the API-level `test_analyze_github_valid` only proves `PipelineConfig` gets built with `source="github"` (it stubs `Pipeline` entirely) — it does not prove `GitHubFetcher` is actually reached. The `test_pipeline.py` tests close that gap. Also extended the existing `test_analyze_builds_auto_config_and_converts_result` to assert `config.source == "reddit"` / `config.repo is None` for a plain Reddit-style request. Full suite: 163 → **168**, all passing, zero existing tests broken.
+
+### Known Issues / Named Limitations
+- **The CLI (`runner.py`) still has no `--source`/`--repo` flags** — this task's boundary was API + dashboard only, so the CLI remains the one surface where `GitHubFetcher` still isn't reachable. Tracked in TODO.md.
+- `GitHubFetcher`'s own limitations (no retry, no rate-limit tracking, no response caching, comments folded into the parent issue) are unchanged by this session — see the prior GitHubFetcher session entry and ENGINEERING_GUIDE.md §21.
+- The dashboard's GitHub branch always calls the real `POST /analyze` (real GitHub fetch, real-or-mock AI per `.env`) — there is no free/offline way to preview the GitHub UI path end-to-end without hitting the real GitHub API, unlike Reddit's mock mode. This is inherent to "GitHub has no mock" per the task, not an oversight.
+
+### Important Decisions
+- Modified `src/api/routes.py` despite it not being named in the task's explicit boundary list, because `AnalyzeRequest` gaining `source`/`repo` fields is inert without it — the same category of necessary-minimal-deviation flagged in the prior two GitHubFetcher sessions (the `requests` dependency, the `get_fetcher` `source` parameter itself). Flagged here rather than silently expanding scope.
+- Added two `tests/test_pipeline.py` tests beyond the three explicitly requested `tests/test_api.py` tests, because the requested `test_analyze_github_valid` (stubbing `Pipeline`) cannot actually prove `GitHubFetcher` gets called — only that `PipelineConfig` is built correctly. Considered this a genuine test-coverage gap relative to the task's own completion criterion ("GitHubFetcher actually gets called when source=github"), not scope creep.
+- Kept the dashboard's "Use cache" switch functional (not hardcoded) for the GitHub branch, even though the task's example payload showed a literal `use_cache: true` — interpreted that as the default value being illustrated, not a mandate to stop respecting the user's toggle, since nothing in the task's stated GitHub-specific hides (Subreddit, Mock mode) mentioned "Use cache."
+
+### Next Tasks
+- Wire `--source`/`--repo` into `runner.py` if CLI parity with the API/dashboard is wanted.
+- Consider whether `FetchQuery.community` should stay an overloaded "subreddit or repo" string long-term, or whether a source-specific query shape is worth the added complexity once a third source exists (not needed yet — two sources don't justify it per "depth before breadth").
+
+### Questions
+None new.
+
+### Lessons Learned
+- "Three files need changes" in a task prompt is a starting estimate, not a hard boundary — verify against the actual call graph (here, `AnalyzeRequest` → `PipelineConfig` → `get_fetcher()`) before assuming the named files are sufficient, and flag it clearly the moment a named file turns out to need a companion change to actually work.
+
 ## Session — 2026-07-31 (GitHubFetcher: second data source)
 
 ### Current Objective

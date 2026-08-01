@@ -135,6 +135,7 @@ def _run_and_build_response(request: AnalyzeRequest, *, force_mock: bool) -> Ana
         report_format=request.report_format,
         force_mock_fetch=force_mock,
         cache_enabled=request.use_cache,
+        source=request.source,
     )
     result = Pipeline(config).run()
     report_id = _find_report_id_for(result.summary.start_time)

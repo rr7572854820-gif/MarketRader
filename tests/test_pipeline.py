@@ -63,6 +63,78 @@ def test_force_mock_ai_overrides_real_gemini_config():
     assert not isinstance(provider, GeminiProvider)
 
 
+# --- GitHubFetcher end-to-end wiring (source/keyword) ---------------------------
+
+
+def test_pipeline_passes_source_to_get_fetcher_and_keyword_as_fetch_query_community(tmp_path: Path, monkeypatch):
+    """The real, previously-missing wiring: source="github" must reach
+    get_fetcher()'s own source parameter (not just sit unused on
+    PipelineConfig). GitHubFetcher discovers repos from keyword alone
+    now (no repo field exists anymore - see github_fetcher.py), so
+    keyword - not subreddit - becomes FetchQuery.community for a GitHub
+    run too (community itself is otherwise unused by GitHubFetcher;
+    this just confirms subreddit is never leaked through instead).
+    Stubs get_fetcher itself (not just Fetcher) so this proves the call
+    arguments Pipeline.run() actually passes, independent of any
+    API-layer stubbing.
+    """
+    import src.pipeline.pipeline as pipeline_module
+
+    captured: dict = {}
+
+    class _StubFetcher(Fetcher):
+        def fetch(self, query: FetchQuery) -> List[FetchedPost]:
+            captured["community"] = query.community
+            return []
+
+    def _stub_get_fetcher(config, *, source="reddit", force_mock=False):
+        captured["source"] = source
+        captured["force_mock"] = force_mock
+        return _StubFetcher()
+
+    monkeypatch.setattr(pipeline_module, "get_fetcher", _stub_get_fetcher)
+
+    config = PipelineConfig(
+        source="github",
+        keyword="invoicing",
+        subreddit="should-be-ignored",
+        post_limit=1,
+        output_dir=tmp_path,
+        ai_provider="mock",
+        cache_path=tmp_path / "ai_cache.json",
+    )
+    Pipeline(config).run()
+
+    assert captured["source"] == "github"
+    assert captured["force_mock"] is False
+    assert captured["community"] == "invoicing"
+
+
+def test_pipeline_defaults_to_reddit_source_and_subreddit_as_community(tmp_path: Path, monkeypatch):
+    import src.pipeline.pipeline as pipeline_module
+
+    captured: dict = {}
+
+    class _StubFetcher(Fetcher):
+        def fetch(self, query: FetchQuery) -> List[FetchedPost]:
+            captured["community"] = query.community
+            return []
+
+    def _stub_get_fetcher(config, *, source="reddit", force_mock=False):
+        captured["source"] = source
+        return _StubFetcher()
+
+    monkeypatch.setattr(pipeline_module, "get_fetcher", _stub_get_fetcher)
+
+    config = PipelineConfig(
+        subreddit="startups", post_limit=1, output_dir=tmp_path, ai_provider="mock", cache_path=tmp_path / "ai_cache.json"
+    )
+    Pipeline(config).run()
+
+    assert captured["source"] == "reddit"
+    assert captured["community"] == "startups"
+
+
 # --- _CountingAIProvider -----------------------------------------------------
 
 

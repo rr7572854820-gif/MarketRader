@@ -63,6 +63,9 @@ class Config:
     # call site - test fixtures especially - keeps working unchanged;
     # GitHub was added after those call sites already existed.
     github_token: Optional[str] = None
+    # Same defaulting rule as github_token, for the same reason - Groq
+    # was added after existing Config(...) call sites too.
+    groq_api_key: Optional[str] = None
 
     @property
     def reddit_configured(self) -> bool:
@@ -73,6 +76,11 @@ class Config:
     def gemini_configured(self) -> bool:
         """True only when a Gemini API key is present."""
         return bool(self.gemini_api_key)
+
+    @property
+    def groq_configured(self) -> bool:
+        """True only when a Groq API key is present."""
+        return bool(self.groq_api_key)
 
 
 def load_config(dotenv_path: Optional[Path] = None) -> Config:
@@ -99,4 +107,5 @@ def load_config(dotenv_path: Optional[Path] = None) -> Config:
         reddit_client_secret=_env_str("REDDIT_CLIENT_SECRET"),
         reddit_user_agent=_env_str("REDDIT_USER_AGENT") or MOCK_USER_AGENT,
         github_token=_env_str("GITHUB_TOKEN"),
+        groq_api_key=_env_str("GROQ_API_KEY"),
     )

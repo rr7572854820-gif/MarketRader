@@ -112,6 +112,20 @@ def test_analyze_request_model_treats_blank_keyword_as_no_filter():
     assert AnalyzeRequest().keyword is None
 
 
+def test_analyze_github_missing_keyword(client: TestClient):
+    """repo was removed entirely - GitHubFetcher now discovers repos
+    from keyword alone (see src/fetchers/github_fetcher.py), so keyword
+    is the field that's now required for source="github".
+    """
+    response = client.post("/analyze/mock", json={"source": "github"})
+    assert response.status_code == 422
+
+
+def test_analyze_github_blank_keyword_still_rejected(client: TestClient):
+    response = client.post("/analyze/mock", json={"source": "github", "keyword": "   "})
+    assert response.status_code == 422
+
+
 def test_list_reports_rejects_out_of_range_limit_query_param(client: TestClient):
     response = client.get("/reports", params={"limit": 0})
     assert response.status_code == 422
@@ -244,6 +258,7 @@ def test_analyze_builds_auto_config_and_converts_result(client: TestClient, monk
     assert config.subreddit == "startups"
     assert config.keyword == "refund"
     assert config.post_limit == 10
+    assert config.source == "reddit"
 
     body = response.json()
     assert body["report_id"] is None
@@ -253,6 +268,17 @@ def test_analyze_builds_auto_config_and_converts_result(client: TestClient, monk
     assert body["report"]["top_opportunities"][0]["title"] == "Reconciliation is painful"
     assert body["report"]["top_opportunities"][0]["confidence"] == "Strong"
     assert body["report"]["project_health"]["ai_provider_used"] == "Google Gemini (gemini-flash-latest)"
+
+
+def test_analyze_github_valid(client: TestClient, monkeypatch):
+    monkeypatch.setattr(routes, "Pipeline", _RecordingPipelineStub)
+    response = client.post("/analyze", json={"source": "github", "keyword": "invoicing", "limit": 5})
+
+    assert response.status_code == 200
+    config = _RecordingPipelineStub.last_config
+    assert config.source == "github"
+    assert config.keyword == "invoicing"
+    assert config.post_limit == 5
 
 
 def test_analyze_mock_endpoint_forces_mock_even_with_stubbed_pipeline(client: TestClient, monkeypatch):
@@ -403,5 +429,37 @@ def test_cors_rejects_non_localhost_origin(client: TestClient):
     response = client.options(
         "/health",
         headers={"Origin": "https://evil.example.com", "Access-Control-Request-Method": "GET"},
+    )
+    assert "access-control-allow-origin" not in response.headers
+
+
+def test_cors_preflight_allows_production_vercel_origin(client: TestClient):
+    """The deployed dashboard (Render backend + Vercel frontend): a real
+    OPTIONS preflight against the deployed backend from this exact
+    origin came back "Disallowed CORS origin" because only the
+    localhost regex was configured - src/api/app.py now allow-lists
+    this origin explicitly (see its module docstring). Exact string
+    match, not folded into the localhost regex or widened to a
+    wildcard, so only this known production origin is trusted.
+    """
+    response = client.options(
+        "/analyze",
+        headers={"Origin": "https://market-rader.vercel.app", "Access-Control-Request-Method": "POST"},
+    )
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "https://market-rader.vercel.app"
+
+
+def test_cors_rejects_other_vercel_preview_origin(client: TestClient):
+    """Only the exact production origin is allow-listed - a different
+    (e.g. preview/branch) Vercel subdomain must still be rejected, same
+    as any other non-allow-listed origin.
+    """
+    response = client.options(
+        "/health",
+        headers={
+            "Origin": "https://market-rader-git-some-branch.vercel.app",
+            "Access-Control-Request-Method": "GET",
+        },
     )
     assert "access-control-allow-origin" not in response.headers

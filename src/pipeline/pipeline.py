@@ -59,10 +59,22 @@ class PipelineConfig:
     """Every configuration option requirement 3 named.
 
     Attributes:
-        subreddit: Passed through as FetchQuery.community. Ignored by
-            the mock fetcher, but still required by argparse for
-            clarity about what a real run would target.
-        keyword: Optional keyword filter, passed through unchanged.
+        subreddit: Passed through as FetchQuery.community when
+            source="reddit" (the default). Ignored by the mock fetcher,
+            but still required by argparse/AnalyzeRequest for clarity
+            about what a real run would target.
+        source: Which Fetcher to use - "reddit" (default) or "github".
+            Passed straight through to get_fetcher()'s own source
+            parameter (src/fetchers/__init__.py), which already
+            supported this before any caller actually passed it.
+        keyword: Optional keyword filter for Reddit, passed through
+            unchanged. Required (not optional) when source="github":
+            GitHubFetcher no longer takes an explicit repo - it uses
+            this same keyword to discover candidate repos via GitHub's
+            Search API, then applies it again as the usual post-fetch
+            filter. AnalyzeRequest enforces the "required for github"
+            rule at the API layer; the CLI has no --source flag yet
+            (see ENGINEERING_GUIDE.md's known limitations).
         post_limit: Max posts to fetch.
         output_dir: Where the Markdown report and the pipeline
             execution summary JSON get saved.
@@ -92,6 +104,7 @@ class PipelineConfig:
     """
 
     subreddit: str = "all"
+    source: str = "reddit"
     keyword: Optional[str] = None
     post_limit: int = 25
     output_dir: Path = Path("output")
@@ -184,7 +197,9 @@ class Pipeline:
 
         try:
             app_config = load_config()
-            fetcher = get_fetcher(app_config, force_mock=self._config.force_mock_fetch)
+            fetcher = get_fetcher(
+                app_config, source=self._config.source, force_mock=self._config.force_mock_fetch
+            )
             ai_provider, ai_provider_label = _resolve_ai_provider_and_label(self._config, app_config)
 
             # Layering matters: counting must be *inside* caching, so a
@@ -198,9 +213,12 @@ class Pipeline:
                 caching_provider = CachingAIProvider(counting_provider, cache)
                 active_provider = caching_provider
 
-            query = FetchQuery(
-                community=self._config.subreddit, keyword=self._config.keyword, limit=self._config.post_limit
-            )
+            # GitHubFetcher ignores FetchQuery.community entirely (repo
+            # discovery is keyword-driven - see github_fetcher.py); the
+            # keyword is passed here too only so log lines naming
+            # "community" print something meaningful for a GitHub run.
+            community = self._config.keyword or "" if self._config.source == "github" else self._config.subreddit
+            query = FetchQuery(community=community, keyword=self._config.keyword, limit=self._config.post_limit)
 
             posts = self._fetch(fetcher, query, errors)
             insights = self._analyze(posts, active_provider, errors)

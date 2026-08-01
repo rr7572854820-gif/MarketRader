@@ -28,6 +28,16 @@ the "true backend bug" this task's instructions allow fixing. Scoped to
 localhost/127.0.0.1 (any port, via regex, since `next dev` picks
 whatever port is free) rather than a wildcard - this is a personal,
 local-only tool, not a public deployment.
+
+Production origin (deployment: Render backend + Vercel dashboard):
+confirmed via a live OPTIONS preflight against the deployed backend
+that the Vercel dashboard's origin was being rejected ("Disallowed
+CORS origin") because only the localhost regex above matched -
+reachable in a browser (unlike curl/docs, which aren't subject to
+CORS at all). Added as an explicit exact-string entry in allow_origins,
+not folded into the regex or widened to a wildcard, so only this one
+known production origin is trusted; allow_origin_regex keeps handling
+the arbitrary-port localhost case for local dev.
 """
 
 from __future__ import annotations
@@ -53,6 +63,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
+    allow_origins=["https://market-rader.vercel.app"],
     allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_credentials=False,
     allow_methods=["*"],
