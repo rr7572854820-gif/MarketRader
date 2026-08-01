@@ -10,10 +10,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ErrorState } from "@/components/error-state";
 import { AnalysisResultSkeleton } from "@/components/skeletons/analysis-result-skeleton";
 import { api } from "@/lib/api/client";
-import type { AnalyzeResponse } from "@/lib/api/types";
+import type { AnalyzeRequest, AnalyzeResponse, Source } from "@/lib/api/types";
 import { getDefaultMockMode } from "@/lib/settings";
 import { cacheFreshReport } from "@/lib/report-cache";
 import { useClientValue } from "@/hooks/use-client-value";
@@ -23,13 +24,21 @@ const MAX_LIMIT = 100;
 
 interface FieldErrors {
   subreddit?: string;
+  keyword?: string;
   limit?: string;
 }
 
-function validate(subreddit: string, limitRaw: string): FieldErrors {
+function validate(source: Source, subreddit: string, keyword: string, limitRaw: string): FieldErrors {
   const errors: FieldErrors = {};
-  if (!subreddit.trim()) {
-    errors.subreddit = "Subreddit must not be blank.";
+  if (source === "reddit") {
+    if (!subreddit.trim()) {
+      errors.subreddit = "Subreddit must not be blank.";
+    }
+  } else if (!keyword.trim()) {
+    // GitHubFetcher discovers repos from the keyword itself (GitHub
+    // Search API) - there is no separate repo input anymore, so a
+    // keyword is required, not optional, for this source.
+    errors.keyword = "Keyword is required for GitHub source - MarketRadar uses it to find repositories.";
   }
   const limit = Number(limitRaw);
   if (!Number.isInteger(limit) || limit < MIN_LIMIT || limit > MAX_LIMIT) {
@@ -39,6 +48,7 @@ function validate(subreddit: string, limitRaw: string): FieldErrors {
 }
 
 export function AnalysisForm() {
+  const [source, setSource] = React.useState<Source>("reddit");
   const [subreddit, setSubreddit] = React.useState("all");
   const [keyword, setKeyword] = React.useState("");
   const [limit, setLimit] = React.useState("25");
@@ -68,7 +78,7 @@ export function AnalysisForm() {
     // Enter while React hasn't re-rendered the disabled state yet).
     if (isSubmitting) return;
 
-    const errors = validate(subreddit, limit);
+    const errors = validate(source, subreddit, keyword, limit);
     setFieldErrors(errors);
     if (Object.keys(errors).length > 0) {
       return;
@@ -78,17 +88,28 @@ export function AnalysisForm() {
     setError(null);
     setResult(null);
 
+    // GitHub has no mock equivalent (force_mock always returns Reddit's
+    // MockFetcher regardless of source - see src/fetchers/__init__.py),
+    // so a GitHub run always hits the real POST /analyze endpoint.
+    const payload: AnalyzeRequest =
+      source === "github"
+        ? {
+            source: "github",
+            keyword: keyword.trim(),
+            limit: Number(limit),
+            use_cache: useCache,
+            report_format: "both",
+          }
+        : {
+            subreddit: subreddit.trim(),
+            keyword: keyword.trim() || null,
+            limit: Number(limit),
+            use_cache: useCache,
+            report_format: "both",
+          };
+
     try {
-      const response = await api.analyze(
-        {
-          subreddit: subreddit.trim(),
-          keyword: keyword.trim() || null,
-          limit: Number(limit),
-          use_cache: useCache,
-          report_format: "both",
-        },
-        mockMode
-      );
+      const response = await api.analyze(payload, source === "github" ? false : mockMode);
       setResult(response);
       if (response.report_id && response.report) {
         cacheFreshReport(response.report_id, response.report);
@@ -119,37 +140,68 @@ export function AnalysisForm() {
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-5" noValidate>
+            <div className="space-y-1.5">
+              <Label>Source</Label>
+              <Tabs
+                value={source}
+                onValueChange={(value) => setSource(value as Source)}
+              >
+                <TabsList>
+                  <TabsTrigger value="reddit" disabled={isSubmitting}>
+                    Reddit
+                  </TabsTrigger>
+                  <TabsTrigger value="github" disabled={isSubmitting}>
+                    GitHub
+                  </TabsTrigger>
+                </TabsList>
+              </Tabs>
+            </div>
+
             <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-1.5">
-                <Label htmlFor="subreddit">Subreddit</Label>
-                <Input
-                  id="subreddit"
-                  value={subreddit}
-                  onChange={(e) => setSubreddit(e.target.value)}
-                  placeholder="startups"
-                  disabled={isSubmitting}
-                  aria-invalid={Boolean(fieldErrors.subreddit)}
-                  aria-describedby={fieldErrors.subreddit ? "subreddit-error" : undefined}
-                />
-                {fieldErrors.subreddit ? (
-                  <p id="subreddit-error" className="text-sm text-destructive">
-                    {fieldErrors.subreddit}
-                  </p>
-                ) : (
-                  <p className="text-sm text-muted-foreground">Ignored in mock mode, but still required.</p>
-                )}
-              </div>
+              {source === "reddit" ? (
+                <div className="space-y-1.5">
+                  <Label htmlFor="subreddit">Subreddit</Label>
+                  <Input
+                    id="subreddit"
+                    value={subreddit}
+                    onChange={(e) => setSubreddit(e.target.value)}
+                    placeholder="startups"
+                    disabled={isSubmitting}
+                    aria-invalid={Boolean(fieldErrors.subreddit)}
+                    aria-describedby={fieldErrors.subreddit ? "subreddit-error" : undefined}
+                  />
+                  {fieldErrors.subreddit ? (
+                    <p id="subreddit-error" className="text-sm text-destructive">
+                      {fieldErrors.subreddit}
+                    </p>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">Ignored in mock mode, but still required.</p>
+                  )}
+                </div>
+              ) : null}
 
               <div className="space-y-1.5">
-                <Label htmlFor="keyword">Keyword (optional)</Label>
+                <Label htmlFor="keyword">{source === "github" ? "Keyword" : "Keyword (optional)"}</Label>
                 <Input
                   id="keyword"
                   value={keyword}
                   onChange={(e) => setKeyword(e.target.value)}
-                  placeholder="invoicing"
+                  placeholder={source === "github" ? "invoicing, AI coding tools, developer productivity" : "invoicing"}
                   disabled={isSubmitting}
+                  aria-invalid={Boolean(fieldErrors.keyword)}
+                  aria-describedby={fieldErrors.keyword ? "keyword-error" : undefined}
                 />
-                <p className="text-sm text-muted-foreground">Only include posts/comments containing this keyword.</p>
+                {fieldErrors.keyword ? (
+                  <p id="keyword-error" className="text-sm text-destructive">
+                    {fieldErrors.keyword}
+                  </p>
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    {source === "github"
+                      ? "MarketRadar will automatically find the most relevant GitHub repositories for this topic."
+                      : "Only include posts/comments containing this keyword."}
+                  </p>
+                )}
               </div>
 
               <div className="space-y-1.5">
@@ -183,12 +235,14 @@ export function AnalysisForm() {
                     Use cache
                   </Label>
                 </div>
-                <div className="flex items-center gap-2">
-                  <Switch id="mock-mode" checked={mockMode} onCheckedChange={setMockModeOverride} disabled={isSubmitting} />
-                  <Label htmlFor="mock-mode" className="font-normal">
-                    Mock mode
-                  </Label>
-                </div>
+                {source === "reddit" ? (
+                  <div className="flex items-center gap-2">
+                    <Switch id="mock-mode" checked={mockMode} onCheckedChange={setMockModeOverride} disabled={isSubmitting} />
+                    <Label htmlFor="mock-mode" className="font-normal">
+                      Mock mode
+                    </Label>
+                  </div>
+                ) : null}
               </div>
             </div>
 

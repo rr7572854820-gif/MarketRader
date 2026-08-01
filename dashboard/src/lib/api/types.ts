@@ -19,9 +19,12 @@ export type ConfidenceLevel = "Strong" | "Moderate" | "Weak";
 
 export type ReportFormat = "terminal" | "markdown" | "both";
 
+export type Source = "reddit" | "github";
+
 export interface AnalyzeRequest {
   keyword?: string | null;
-  subreddit: string;
+  subreddit?: string;
+  source?: Source;
   limit: number;
   use_cache: boolean;
   report_format: ReportFormat;
