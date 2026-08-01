@@ -35,10 +35,15 @@ function validate(source: Source, subreddit: string, keyword: string, limitRaw: 
       errors.subreddit = "Subreddit must not be blank.";
     }
   } else if (!keyword.trim()) {
-    // GitHubFetcher discovers repos from the keyword itself (GitHub
-    // Search API) - there is no separate repo input anymore, so a
-    // keyword is required, not optional, for this source.
-    errors.keyword = "Keyword is required for GitHub source - MarketRadar uses it to find repositories.";
+    // Not a "must look like a technical keyword" check - any natural-
+    // language description works now (Pipeline.run() runs it through
+    // AI-assisted extract_search_terms before searching GitHub, see
+    // src/insights/keyword_extraction.py). This is the one thing that
+    // still can't be relaxed: the backend requires a non-blank value
+    // for source="github" (AnalyzeRequest's model_validator) since
+    // there's nothing to extract search terms from otherwise - kept
+    // here so that's a friendly inline message instead of a raw 422.
+    errors.keyword = "Tell MarketRadar what you're looking for - it can be a full sentence.";
   }
   const limit = Number(limitRaw);
   if (!Number.isInteger(limit) || limit < MIN_LIMIT || limit > MAX_LIMIT) {
@@ -181,12 +186,14 @@ export function AnalysisForm() {
               ) : null}
 
               <div className="space-y-1.5">
-                <Label htmlFor="keyword">{source === "github" ? "Keyword" : "Keyword (optional)"}</Label>
+                <Label htmlFor="keyword">{source === "github" ? "What are you looking for?" : "Keyword (optional)"}</Label>
                 <Input
                   id="keyword"
                   value={keyword}
                   onChange={(e) => setKeyword(e.target.value)}
-                  placeholder={source === "github" ? "invoicing, AI coding tools, developer productivity" : "invoicing"}
+                  placeholder={
+                    source === "github" ? "e.g. I keep hearing people complain about invoice automation" : "invoicing"
+                  }
                   disabled={isSubmitting}
                   aria-invalid={Boolean(fieldErrors.keyword)}
                   aria-describedby={fieldErrors.keyword ? "keyword-error" : undefined}
@@ -198,7 +205,7 @@ export function AnalysisForm() {
                 ) : (
                   <p className="text-sm text-muted-foreground">
                     {source === "github"
-                      ? "MarketRadar will automatically find the most relevant GitHub repositories for this topic."
+                      ? "Describe what you're looking for in plain English. MarketRadar will find the right repositories."
                       : "Only include posts/comments containing this keyword."}
                   </p>
                 )}

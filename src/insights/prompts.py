@@ -60,6 +60,39 @@ CRITICAL RULES:
 - "secondary_pain_points", "feature_requests", and "buying_signals" may be empty lists if the text doesn't support any."""
 
 
+KEYWORD_EXTRACTION_INSTRUCTIONS = """Extract 2-3 specific technical search keywords
+from this user input for searching GitHub repositories.
+
+User input: "{user_input}"
+
+Rules:
+- Return ONLY the keywords, nothing else
+- No explanation, no punctuation
+- 2-3 words maximum
+- Focus on the technical domain
+- Examples:
+  "problems with invoice automation" -> "invoicing automation"
+  "best saas ideas" -> "saas productivity"
+  "current market pain problems" -> "developer tools"
+  "I want to build something for payments" -> "payments fintech"
+  "authentication is broken everywhere" -> "authentication security"
+  "what are developers complaining about" -> "developer experience"
+
+Keywords:"""
+
+
+def build_keyword_extraction_prompt(user_input: str) -> str:
+    """Builds the prompt sent to the AI provider to turn a free-text,
+    natural-language description into a short GitHub search query.
+
+    See src/insights/keyword_extraction.py for why the caller must
+    still post-process the response rather than trusting "2-3 words,
+    no punctuation" literally - verified against a real provider
+    (Groq) that the instruction is a strong steer, not a guarantee.
+    """
+    return KEYWORD_EXTRACTION_INSTRUCTIONS.format(user_input=user_input)
+
+
 def build_extraction_prompt(title: str, text: str, source_url: str) -> str:
     """Builds the prompt sent to the AI provider for a single discussion.
 

@@ -10,6 +10,8 @@ offline test suite. This is deliberate test hygiene, not incidental.
 from __future__ import annotations
 
 import json
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
 
@@ -133,6 +135,274 @@ def test_pipeline_defaults_to_reddit_source_and_subreddit_as_community(tmp_path:
 
     assert captured["source"] == "reddit"
     assert captured["community"] == "startups"
+
+
+# --- GitHub natural-language keyword extraction (src/insights/keyword_extraction.py) --
+
+
+def test_pipeline_extracts_search_terms_before_github_fetch(tmp_path: Path, monkeypatch):
+    """Adapted from the originally-requested 'discover_repos calls
+    extract_search_terms before the GitHub API' - discover_repos no
+    longer exists (GitHubFetcher searches directly now, see
+    github_fetcher.py's module docstring), and extraction happens in
+    Pipeline.run() rather than inside GitHubFetcher itself, so
+    GitHubFetcher stays AI-free (see PipelineConfig.keyword's and
+    keyword_extraction.py's docstrings for why). This is the real
+    equivalent: extract_search_terms runs before the fetch, and its
+    result - not the raw natural-language input - is what the fetcher
+    actually receives.
+    """
+    import src.pipeline.pipeline as pipeline_module
+
+    captured: dict = {}
+
+    def _stub_extract(user_input, ai_provider):
+        captured["extract_called_with"] = user_input
+        return "invoicing automation"
+
+    class _StubFetcher(Fetcher):
+        def fetch(self, query: FetchQuery) -> List[FetchedPost]:
+            captured["fetch_keyword"] = query.keyword
+            return []
+
+    monkeypatch.setattr(pipeline_module, "extract_search_terms", _stub_extract)
+    monkeypatch.setattr(
+        pipeline_module, "get_fetcher", lambda config, *, source="reddit", force_mock=False: _StubFetcher()
+    )
+
+    config = PipelineConfig(
+        source="github",
+        keyword="problems with invoice automation",
+        post_limit=5,
+        output_dir=tmp_path,
+        ai_provider="mock",
+        cache_path=tmp_path / "ai_cache.json",
+    )
+    Pipeline(config).run()
+
+    assert captured["extract_called_with"] == "problems with invoice automation"
+    assert captured["fetch_keyword"] == "invoicing automation"  # extracted value, not raw input
+
+
+def test_pipeline_does_not_extract_search_terms_for_reddit_source(tmp_path: Path, monkeypatch):
+    """extract_search_terms is GitHub-only (see PipelineConfig.keyword's
+    docstring) - a Reddit run's keyword must reach the fetcher
+    completely unchanged, with no AI call in between.
+    """
+    import src.pipeline.pipeline as pipeline_module
+
+    captured: dict = {}
+
+    def _stub_extract(user_input, ai_provider):
+        captured["extract_called"] = True
+        return "should never be used"
+
+    class _StubFetcher(Fetcher):
+        def fetch(self, query: FetchQuery) -> List[FetchedPost]:
+            captured["fetch_keyword"] = query.keyword
+            return []
+
+    monkeypatch.setattr(pipeline_module, "extract_search_terms", _stub_extract)
+    monkeypatch.setattr(
+        pipeline_module, "get_fetcher", lambda config, *, source="reddit", force_mock=False: _StubFetcher()
+    )
+
+    config = PipelineConfig(
+        source="reddit",
+        subreddit="startups",
+        keyword="invoice automation problems",
+        post_limit=5,
+        output_dir=tmp_path,
+        ai_provider="mock",
+        cache_path=tmp_path / "ai_cache.json",
+    )
+    Pipeline(config).run()
+
+    assert "extract_called" not in captured
+    assert captured["fetch_keyword"] == "invoice automation problems"
+
+
+# --- GitHub report-count reliability (PipelineConfig.num_reports) -------------------
+
+
+def _post(index: int) -> FetchedPost:
+    return FetchedPost(
+        source="github",
+        item_type="post",
+        id=f"post-{index}",
+        title=f"issue {index}",
+        text=f"pain point number {index} described here in enough detail to extract.",
+        author="someone",
+        url=f"https://github.com/example/repo/issues/{index}",
+        created_at=datetime.now(timezone.utc),
+        score=0,
+        is_mock=False,
+    )
+
+
+class _AvailablePostsFetcher(Fetcher):
+    """Simulates a real source with a fixed total pool of `available`
+    distinct discussions - fetch() never returns more than that,
+    regardless of how large a limit is requested (the same way a real
+    GitHub search can only ever return as many genuinely matching
+    issues as exist). Records every requested limit so tests can assert
+    on the pipeline's actual fetch pattern (one call vs. an oversample
+    round).
+    """
+
+    def __init__(self, available: int) -> None:
+        self._available = available
+        self.calls: List[int] = []
+
+    def fetch(self, query: FetchQuery) -> List[FetchedPost]:
+        self.calls.append(query.limit)
+        return [_post(i) for i in range(min(query.limit, self._available))]
+
+
+class _MergeEveryFourAIProvider(AIProvider):
+    """Test double standing in for a real AI provider's clustering
+    judgment: extraction reuses MockAIProvider's real (schema-valid,
+    quote-verified) behavior unchanged, but clustering merges every 4
+    consecutive discussions into one cluster (ceil(n/4) clusters for n
+    discussions) instead of MockAIProvider's always-1-cluster-per-post
+    default.
+
+    This is what makes num_reports's oversampling round meaningful to
+    test at all: with MockAIProvider's real singleton-per-post
+    behavior, requesting 3x num_reports discussions up front always
+    already yields >= num_reports clusters whenever that many
+    discussions exist, so the "still short after round 1, try once
+    more" path never actually triggers. A real provider that finds
+    duplicates (the entire reason clustering exists - see
+    src/insights/aggregator.py's module docstring) can plausibly merge
+    a first, smaller batch down below the requested count while a
+    larger batch - reachable only via a second fetch round - has
+    genuinely more distinct underlying pain points to surface.
+    """
+
+    def __init__(self) -> None:
+        self._mock = MockAIProvider()
+
+    def check_connection(self) -> None:
+        return
+
+    def generate_text(self, prompt: str) -> str:
+        if 'Discussion text:\n"""' in prompt:
+            return self._mock.generate_text(prompt)  # extraction: unchanged real mock behavior
+        indices = [int(i) for i in re.findall(r"^\[(\d+)\]", prompt, re.MULTILINE)]
+        clusters = [indices[i : i + 4] for i in range(0, len(indices), 4)]
+        return json.dumps(
+            {"clusters": [{"label": f"cluster {i}", "member_indices": members} for i, members in enumerate(clusters)]}
+        )
+
+
+def _patch_github_fetch_and_clustering(monkeypatch, fetcher: Fetcher, ai_provider: AIProvider) -> None:
+    import src.pipeline.pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "get_fetcher", lambda config, *, source="reddit", force_mock=False: fetcher)
+    monkeypatch.setattr(pipeline_module, "get_ai_provider", lambda config, *, force_mock=False: ai_provider)
+
+
+def test_num_reports_initial_fetch_requests_oversample_multiplier(tmp_path: Path, monkeypatch):
+    fetcher = _AvailablePostsFetcher(available=20)
+    _patch_github_fetch_and_clustering(monkeypatch, fetcher, MockAIProvider())
+
+    config = PipelineConfig(
+        source="github",
+        keyword="invoicing",
+        post_limit=25,
+        num_reports=3,
+        output_dir=tmp_path,
+        ai_provider="mock",
+        cache_path=tmp_path / "ai_cache.json",
+    )
+    result = Pipeline(config).run()
+
+    assert fetcher.calls == [9]  # 3x num_reports, not post_limit
+    assert result.summary.succeeded is True
+    assert result.summary.clusters_found == 9  # full analysis breadth, unmerged mock clustering
+    assert len(result.report.top_opportunities) == 3  # surfaced deliverable capped to what was requested
+
+
+def test_num_reports_returns_requested_count_when_data_is_sufficient(tmp_path: Path, monkeypatch):
+    """Core reliability guarantee: given enough real underlying data
+    (even after a first batch merges down below the requested count),
+    a second, larger fetch round finds enough genuinely distinct
+    opportunities to satisfy the request exactly.
+    """
+    fetcher = _AvailablePostsFetcher(available=40)
+    _patch_github_fetch_and_clustering(monkeypatch, fetcher, _MergeEveryFourAIProvider())
+
+    config = PipelineConfig(
+        source="github",
+        keyword="invoicing",
+        post_limit=50,
+        num_reports=5,
+        output_dir=tmp_path,
+        ai_provider="mock",
+        cache_path=tmp_path / "ai_cache.json",
+    )
+    result = Pipeline(config).run()
+
+    assert fetcher.calls == [15, 50]  # round 1 (3x5, short after merging) + one oversample round at post_limit
+    assert result.summary.succeeded is True
+    assert result.summary.posts_fetched == 40  # merged/deduplicated across both rounds, not 15+40
+    assert result.summary.clusters_found == 10  # ceil(40/4) - full analysis breadth
+    assert len(result.report.top_opportunities) == 5  # exactly what was requested
+
+
+def test_num_reports_returns_fewer_when_genuinely_insufficient_data(tmp_path: Path, monkeypatch):
+    """'Only return fewer than N if genuinely fewer are available':
+    with just 8 real discussions total, no amount of oversampling can
+    produce 5 distinct clusters under a 4-per-cluster merge ratio - the
+    pipeline must try the one extra round, then honestly stop rather
+    than loop indefinitely or fabricate additional reports.
+    """
+    fetcher = _AvailablePostsFetcher(available=8)
+    _patch_github_fetch_and_clustering(monkeypatch, fetcher, _MergeEveryFourAIProvider())
+
+    config = PipelineConfig(
+        source="github",
+        keyword="invoicing",
+        post_limit=50,
+        num_reports=5,
+        output_dir=tmp_path,
+        ai_provider="mock",
+        cache_path=tmp_path / "ai_cache.json",
+    )
+    result = Pipeline(config).run()
+
+    assert fetcher.calls == [15, 50]  # exactly one oversample round, never an unbounded retry loop
+    assert result.summary.succeeded is True  # a genuine shortfall is not a pipeline failure
+    assert result.summary.posts_fetched == 8
+    assert result.summary.clusters_found == 2  # ceil(8/4)
+    assert len(result.report.top_opportunities) == 2  # honestly fewer than the 5 requested, never fabricated
+
+
+def test_num_reports_ignored_for_non_github_source(tmp_path: Path, monkeypatch):
+    """num_reports is documented as GitHub-only (Reddit's fetch
+    mechanism doesn't support the same oversample-and-retry approach) -
+    a Reddit run must behave exactly as if num_reports were never set:
+    a single fetch at post_limit, no oversampling, no capping of
+    top_opportunities.
+    """
+    fetcher = _AvailablePostsFetcher(available=2)
+    _patch_github_fetch_and_clustering(monkeypatch, fetcher, MockAIProvider())
+
+    config = PipelineConfig(
+        source="reddit",
+        subreddit="test",
+        post_limit=10,
+        num_reports=5,
+        output_dir=tmp_path,
+        ai_provider="mock",
+        cache_path=tmp_path / "ai_cache.json",
+    )
+    result = Pipeline(config).run()
+
+    assert fetcher.calls == [10]  # post_limit directly, never 3x num_reports
+    assert result.summary.clusters_found == 2
+    assert len(result.report.top_opportunities) == 2  # not capped/truncated to num_reports
 
 
 # --- _CountingAIProvider -----------------------------------------------------

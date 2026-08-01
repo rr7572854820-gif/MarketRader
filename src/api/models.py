@@ -26,9 +26,15 @@ way it was already ignored against mock data.
 
 `repo` was removed (GitHubFetcher's own repo-discovery feature, see
 src/fetchers/github_fetcher.py's module docstring): a GitHub request no
-longer names an exact repository - `keyword` alone drives both GitHub's
-Search API (to find repos) and the existing post-fetch filter, so it is
-now required, not optional, when source="github".
+longer names an exact repository - `keyword` alone is the entire GitHub
+Search Issues API query, matched directly against issue titles/bodies
+across all of public GitHub, so it is required, not optional, when
+source="github".
+
+`num_reports` (GitHub-only report-count reliability): see
+src.pipeline.pipeline.PipelineConfig.num_reports for the full behavior
+this drives - this field only carries the request-layer bound (1-100,
+same reasoning as `limit`'s own cap above).
 """
 
 from __future__ import annotations
@@ -46,11 +52,24 @@ Source = Literal["reddit", "github"]
 
 class AnalyzeRequest(BaseModel):
     keyword: Optional[str] = Field(
-        default=None, description="Only include posts/comments containing this keyword (case-insensitive). Blank/whitespace-only is treated as no filter for Reddit, same as the CLI - but required when source='github', where it also drives repo discovery."
+        default=None, description="Only include posts/comments containing this keyword (case-insensitive). Blank/whitespace-only is treated as no filter for Reddit, same as the CLI - but required when source='github', where it is the entire GitHub Search Issues API query (no repository needed)."
     )
     subreddit: str = Field(default="all", min_length=1, description="Subreddit to fetch from, without 'r/'. Ignored when source='github' or against mock data, but still validated.")
     source: Source = Field(default="reddit", description="Which Fetcher to use - 'reddit' (default) or 'github'.")
-    limit: int = Field(default=25, ge=1, le=100, description="Maximum posts to fetch. Capped at 100 for this API (see module docstring).")
+    limit: int = Field(default=25, ge=1, le=100, description="Maximum posts to fetch. Capped at 100 for this API (see module docstring). Remains the hard ceiling even when num_reports is set.")
+    num_reports: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=100,
+        description=(
+            "Desired number of final opportunity reports (top_opportunities entries) after extraction, "
+            "verification, and deduplication. Only meaningful when source='github' - ignored for source='reddit', "
+            "the same way subreddit is ignored for source='github'. When set, the pipeline fetches more than this "
+            "many discussions (up to `limit`, which is never exceeded) and retries once with more discussions if "
+            "still short. Returning fewer than requested is expected, not an error, whenever `limit` or genuinely "
+            "available discussions run out first - see PipelineConfig.num_reports for the full behavior."
+        ),
+    )
     use_cache: bool = Field(default=True, description="Reuse cached AI responses for identical prompts. Same semantics as the CLI's --no-cache when set to false.")
     report_format: ReportFormat = Field(default="both", description="'terminal' returns the report in the response only; 'markdown' saves a file only; 'both' does both.")
 

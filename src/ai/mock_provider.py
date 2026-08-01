@@ -3,9 +3,10 @@ calling any real AI backend.
 
 Used automatically by the factory (src/ai/__init__.py) when
 config.gemini_configured is False, so pipeline code (including the
-Extractor's JSON parsing and the Aggregator's AI-assisted clustering)
-can be built and exercised end-to-end without any AI provider
-credentials at all.
+Extractor's JSON parsing, the Aggregator's AI-assisted clustering, and
+Pipeline.run()'s GitHub keyword extraction - see
+src/insights/keyword_extraction.py) can be built and exercised
+end-to-end without any AI provider credentials at all.
 
 Schema fix: this used to return a fixed, obviously-non-JSON sentence.
 That satisfied "never mistaken for a genuine finding" but also meant
@@ -40,6 +41,21 @@ _DISCUSSION_TEXT_RE = re.compile(r'Discussion text:\n"""\n(.*)\n"""\s*$', re.DOT
 # "[0] Description: ...", one per discussion, in index order.
 _CLUSTER_INDEX_RE = re.compile(r"^\[(\d+)\]", re.MULTILINE)
 
+# build_keyword_extraction_prompt (src/insights/prompts.py) is the only
+# prompt shape containing this exact phrase - checked before the two
+# regexes above since it doesn't match either of them (a keyword-
+# extraction prompt has no "Discussion text:" block and no "[N]" index
+# lines), so without this check it would silently fall through to
+# _clustering_response and return an unrelated, useless JSON blob.
+_KEYWORD_EXTRACTION_MARKER = "specific technical search keywords"
+# [^\n]* (not DOTALL .*) deliberately - the prompt's few-shot examples
+# also contain quoted strings later on, so a greedy DOTALL match here
+# would capture everything up to the LAST quote in the whole prompt
+# (inside those examples) instead of just this one line - found by
+# a real failing test (a real "invoicing" input was wrongly matched
+# with an unrelated example word "rules" from later in the prompt).
+_KEYWORD_EXTRACTION_INPUT_RE = re.compile(r'User input: "([^\n]*)"')
+
 
 class MockAIProvider(AIProvider):
     """Always "succeeds" and returns deterministic, schema-valid JSON.
@@ -58,6 +74,8 @@ class MockAIProvider(AIProvider):
         return  # nothing to check — there's no real backend behind this
 
     def generate_text(self, prompt: str) -> str:
+        if _KEYWORD_EXTRACTION_MARKER in prompt:
+            return self._keyword_extraction_response(prompt)
         match = _DISCUSSION_TEXT_RE.search(prompt)
         if match is not None:
             return self._extraction_response(match.group(1).strip())
@@ -83,6 +101,26 @@ class MockAIProvider(AIProvider):
                 "supporting_evidence": [quote] if quote else [],
             }
         )
+
+    def _keyword_extraction_response(self, prompt: str) -> str:
+        """Deliberately NOT prefixed with MOCK_RESPONSE_PREFIX like the
+        other speculative fields above. Those are displayed to the user
+        as-is, so the prefix keeps them recognizably fake; this value
+        instead gets consumed internally to drive a real GitHub Search
+        Issues API call (src/insights/keyword_extraction.py) - a
+        prefixed response would make that real search essentially
+        non-functional for the legitimate case of running a mock AI
+        provider against a real GitHub fetch (real data, no AI cost).
+        Returns a plausible short phrase using the same naive-
+        extraction shape keyword_extraction.py's own fallback uses,
+        not a schema-driven response - there's no JSON schema for this
+        prompt, unlike extraction/clustering.
+        """
+        match = _KEYWORD_EXTRACTION_INPUT_RE.search(prompt)
+        user_input = match.group(1) if match else ""
+        words = re.findall(r"[a-zA-Z0-9']+", user_input.lower())
+        meaningful = [w for w in words if len(w) > 3][:2]
+        return " ".join(meaningful) if meaningful else "software"
 
     def _clustering_response(self, prompt: str) -> str:
         # One singleton cluster per discussion — a mock has no real

@@ -3,18 +3,14 @@
 never hits the real GitHub API, same offline-test discipline as every
 other fetcher/provider test in this project.
 
-GitHubFetcher no longer takes an explicit repo - every fetch() call now
-discovers candidate repos from query.keyword via GitHub's Search API
-first, then fetches issues from each. Every test below therefore mocks
-the search endpoint too, via _MockGitHubAPI, which routes a fake
-requests.get by URL shape (search vs. issues vs. comments) and records
-every call so tests can assert on what was actually requested (e.g.
-per-repo page-size distribution), not just on the final result.
-
-Because fetch()'s final step re-applies the same keyword as a filter on
-the combined results (see github_fetcher.py's fetch() docstring), every
-mocked issue expected to survive uses "invoicing" as the test keyword
-throughout, in either its title or body.
+GitHubFetcher searches GitHub's Search Issues API (/search/issues)
+directly with query.keyword - no repository is ever specified by the
+caller, and no repo-discovery step happens first (see the module
+docstring for why the old repo-discovery design was replaced). Every
+test below mocks that single search endpoint (plus the per-issue
+comments endpoint), via _MockGitHubAPI, which routes a fake
+requests.get by URL shape and records every call so tests can assert
+on what was actually requested.
 """
 
 from __future__ import annotations
@@ -26,11 +22,7 @@ import pytest
 
 from src.config import Config
 from src.fetchers.base import FetcherError
-from src.fetchers.exceptions import (
-    FetcherAuthError,
-    FetcherNotFoundError,
-    FetcherRateLimitError,
-)
+from src.fetchers.exceptions import FetcherRateLimitError
 from src.fetchers.github_fetcher import GitHubFetcher
 from src.models import FetchQuery
 
@@ -48,10 +40,10 @@ def _config(token: Optional[str] = None) -> Config:
 
 def _issue(
     number: int = 1,
-    title: str = "invoicing is broken",
-    body: str = "invoicing takes forever to reconcile.",
+    title: str = "invoice automation is broken",
+    body: str = "invoice automation takes forever to reconcile.",
     login: str = "octocat",
-    html_url: str = "https://github.com/owner/repo/issues/1",
+    repo: str = "owner/repo",
     created_at: str = "2026-01-01T00:00:00Z",
     plus_one: int = 0,
     heart: int = 0,
@@ -61,14 +53,11 @@ def _issue(
         "title": title,
         "body": body,
         "user": {"login": login},
-        "html_url": html_url,
+        "html_url": f"https://github.com/{repo}/issues/{number}",
+        "repository_url": f"https://api.github.com/repos/{repo}",
         "created_at": created_at,
         "reactions": {"+1": plus_one, "heart": heart},
     }
-
-
-def _repo_item(full_name: str, *, archived: bool = False, fork: bool = False, open_issues_count: int = 5) -> Dict[str, Any]:
-    return {"full_name": full_name, "archived": archived, "fork": fork, "open_issues_count": open_issues_count}
 
 
 class _FakeResponse:
@@ -80,126 +69,49 @@ class _FakeResponse:
         return self._data
 
 
-def _repo_from_issues_url(url: str) -> str:
-    after = url.split("/repos/", 1)[1]
-    return after.rsplit("/issues", 1)[0]
-
-
 class _MockGitHubAPI:
-    """Fake requests.get, routed by URL shape. search_response answers
-    GET .../search/repositories; issues_responses[repo] answers GET
-    .../repos/{repo}/issues (defaulting to an empty list); comments are
-    always answered with an empty list (no test here needs comment
-    bodies). Every call is recorded in .calls for assertions.
+    """Fake requests.get, routed by URL shape.
+
+    search_pages answers successive GET .../search/issues calls (one
+    entry per `page` param, 1-indexed via list position) - defaults to
+    a single empty page if unset. Comments are always answered with an
+    empty list unless comments_responses[(repo, number)] is set. Every
+    call is recorded in .calls for assertions.
     """
 
     def __init__(self) -> None:
-        self.search_response: Optional[_FakeResponse] = None
-        self.issues_responses: Dict[str, _FakeResponse] = {}
+        self.search_pages: List[_FakeResponse] = []
+        self.comments_responses: Dict[tuple, _FakeResponse] = {}
         self.calls: List[Dict[str, Any]] = []
 
     def __call__(self, url: str, headers=None, params=None, timeout=None) -> _FakeResponse:
         self.calls.append({"url": url, "params": params, "headers": headers})
-        if url.endswith("/search/repositories"):
-            assert self.search_response is not None, "test forgot to set search_response"
-            return self.search_response
+        if url.endswith("/search/issues"):
+            page = (params or {}).get("page", 1)
+            index = page - 1
+            if 0 <= index < len(self.search_pages):
+                return self.search_pages[index]
+            return _FakeResponse(200, {"items": []})
         if "/comments" in url:
-            return _FakeResponse(200, [])
-        repo = _repo_from_issues_url(url)
-        return self.issues_responses.get(repo, _FakeResponse(200, []))
+            repo_and_number = _repo_and_number_from_comments_url(url)
+            return self.comments_responses.get(repo_and_number, _FakeResponse(200, []))
+        raise AssertionError(f"unexpected URL in test: {url}")
+
+
+def _repo_and_number_from_comments_url(url: str) -> tuple:
+    # ".../repos/{owner}/{repo}/issues/{number}/comments"
+    after = url.split("/repos/", 1)[1]
+    parts = after.split("/")
+    repo = "/".join(parts[:2])
+    number = int(parts[3])
+    return (repo, number)
 
 
 def _patch_requests(api: _MockGitHubAPI):
     return patch("src.fetchers.github_fetcher.requests.get", side_effect=api)
 
 
-# --- discover_repos -----------------------------------------------------------------
-
-
-def test_discover_repos_returns_top5():
-    repos = [f"owner/repo{i}" for i in range(5)]
-    api = _MockGitHubAPI()
-    api.search_response = _FakeResponse(200, {"items": [_repo_item(r) for r in repos]})
-
-    with _patch_requests(api):
-        result = GitHubFetcher(_config()).discover_repos("invoicing", max_repos=5)
-
-    assert result == repos
-
-
-def test_discover_repos_filters_archived():
-    api = _MockGitHubAPI()
-    api.search_response = _FakeResponse(
-        200,
-        {"items": [_repo_item("owner/good1"), _repo_item("owner/archived", archived=True), _repo_item("owner/good2")]},
-    )
-
-    with _patch_requests(api):
-        result = GitHubFetcher(_config()).discover_repos("invoicing")
-
-    assert result == ["owner/good1", "owner/good2"]
-
-
-def test_discover_repos_filters_forks():
-    api = _MockGitHubAPI()
-    api.search_response = _FakeResponse(
-        200,
-        {"items": [_repo_item("owner/good1"), _repo_item("owner/afork", fork=True), _repo_item("owner/good2")]},
-    )
-
-    with _patch_requests(api):
-        result = GitHubFetcher(_config()).discover_repos("invoicing")
-
-    assert result == ["owner/good1", "owner/good2"]
-
-
-def test_discover_repos_filters_no_issues():
-    api = _MockGitHubAPI()
-    api.search_response = _FakeResponse(
-        200,
-        {
-            "items": [
-                _repo_item("owner/good1"),
-                _repo_item("owner/dead", open_issues_count=0),
-                _repo_item("owner/good2"),
-            ]
-        },
-    )
-
-    with _patch_requests(api):
-        result = GitHubFetcher(_config()).discover_repos("invoicing")
-
-    assert result == ["owner/good1", "owner/good2"]
-
-
-def test_discover_repos_no_results():
-    api = _MockGitHubAPI()
-    api.search_response = _FakeResponse(200, {"items": [_repo_item("owner/archived", archived=True)]})
-
-    with _patch_requests(api):
-        with pytest.raises(FetcherError):
-            GitHubFetcher(_config()).discover_repos("invoicing")
-
-
-def test_discover_repos_search_rate_limit_exceeded():
-    api = _MockGitHubAPI()
-    api.search_response = _FakeResponse(403, {})
-
-    with _patch_requests(api):
-        with pytest.raises(FetcherRateLimitError):
-            GitHubFetcher(_config()).discover_repos("invoicing")
-
-
-def test_discover_repos_invalid_keyword():
-    api = _MockGitHubAPI()
-    api.search_response = _FakeResponse(422, {})
-
-    with _patch_requests(api):
-        with pytest.raises(FetcherError):
-            GitHubFetcher(_config()).discover_repos("invoicing")
-
-
-# --- fetch(): discovery-driven flow --------------------------------------------------
+# --- fetch(): keyword-only search, no repository specified ---------------------------
 
 
 def test_fetch_requires_keyword():
@@ -207,97 +119,123 @@ def test_fetch_requires_keyword():
         GitHubFetcher(_config()).fetch(FetchQuery(community="ignored", keyword=None, limit=5))
 
 
-def test_fetch_uses_discovery():
+def test_fetch_searches_issues_directly_with_no_repository_specified():
+    """The core behavior this task exists to add: a bare keyword (no
+    repo, no owner/repo string anywhere in the call) finds matching
+    issues across all of public GitHub via a single Search Issues call.
+    """
     api = _MockGitHubAPI()
-    api.search_response = _FakeResponse(200, {"items": [_repo_item("owner/repo1")]})
-    api.issues_responses["owner/repo1"] = _FakeResponse(200, [_issue(number=1)])
+    api.search_pages = [_FakeResponse(200, {"items": [_issue(number=1, repo="invoiceninja/invoiceninja")]})]
 
     with _patch_requests(api):
-        posts = GitHubFetcher(_config()).fetch(FetchQuery(community="ignored", keyword="invoicing", limit=5))
+        posts = GitHubFetcher(_config()).fetch(FetchQuery(community="ignored", keyword="invoice automation", limit=5))
 
     assert len(posts) == 1
     assert posts[0].source == "github"
-    assert any(call["url"].endswith("/search/repositories") for call in api.calls)
+    search_calls = [call for call in api.calls if call["url"].endswith("/search/issues")]
+    assert len(search_calls) == 1
+    assert search_calls[0]["params"]["q"] == "invoice automation type:issue is:open"
+    # No repo-search or per-repo issues-list endpoint is ever hit.
+    assert not any("/search/repositories" in call["url"] for call in api.calls)
 
 
-def test_fetch_distributes_limit():
-    repos = [f"owner/repo{i}" for i in range(5)]
+def test_fetch_matches_issues_whose_repo_name_does_not_contain_the_keyword():
+    """Regression guard for the exact problem the old repo-discovery
+    design had: a repo named "billing-service" would never have
+    surfaced under a repo-name/description/topic search for "invoice
+    automation", but its issues can still genuinely be about it. Search
+    Issues matches issue text directly, so this now works.
+    """
     api = _MockGitHubAPI()
-    api.search_response = _FakeResponse(200, {"items": [_repo_item(r) for r in repos]})
-    for r in repos:
-        api.issues_responses[r] = _FakeResponse(200, [])
-
-    with _patch_requests(api):
-        GitHubFetcher(_config()).fetch(FetchQuery(community="ignored", keyword="invoicing", limit=25))
-
-    issues_calls = [
-        call for call in api.calls if not call["url"].endswith("/search/repositories") and "/comments" not in call["url"]
+    api.search_pages = [
+        _FakeResponse(
+            200,
+            {
+                "items": [
+                    _issue(
+                        number=7,
+                        title="Automate invoice generation on payment",
+                        body="Need to auto-generate an invoice automation workflow when a payment succeeds.",
+                        repo="someorg/billing-service",
+                    )
+                ]
+            },
+        )
     ]
-    assert len(issues_calls) == 5
-    assert all(call["params"]["per_page"] == 5 for call in issues_calls)
-
-
-def test_fetch_skips_failed_repo():
-    api = _MockGitHubAPI()
-    api.search_response = _FakeResponse(200, {"items": [_repo_item("owner/bad"), _repo_item("owner/good")]})
-    api.issues_responses["owner/bad"] = _FakeResponse(404, {})
-    api.issues_responses["owner/good"] = _FakeResponse(200, [_issue(number=1)])
 
     with _patch_requests(api):
-        posts = GitHubFetcher(_config()).fetch(FetchQuery(community="ignored", keyword="invoicing", limit=10))
+        posts = GitHubFetcher(_config()).fetch(FetchQuery(community="ignored", keyword="invoice automation", limit=5))
 
     assert len(posts) == 1
+    assert posts[0].title == "Automate invoice generation on payment"
 
 
-def test_fetch_all_repos_fail():
+def test_fetch_paginates_when_limit_exceeds_one_page():
     api = _MockGitHubAPI()
-    api.search_response = _FakeResponse(200, {"items": [_repo_item("owner/bad1"), _repo_item("owner/bad2")]})
-    api.issues_responses["owner/bad1"] = _FakeResponse(500, {})
-    api.issues_responses["owner/bad2"] = _FakeResponse(500, {})
+    api.search_pages = [
+        _FakeResponse(200, {"items": [_issue(number=i) for i in range(1, 101)]}),  # page 1: full 100
+        _FakeResponse(200, {"items": [_issue(number=101)]}),  # page 2: 1 more
+    ]
+
+    with _patch_requests(api):
+        posts = GitHubFetcher(_config()).fetch(FetchQuery(community="ignored", keyword="invoicing", limit=101))
+
+    assert len(posts) == 101
+    search_calls = [call for call in api.calls if call["url"].endswith("/search/issues")]
+    assert [call["params"]["page"] for call in search_calls] == [1, 2]
+    assert search_calls[0]["params"]["per_page"] == 100
+    assert search_calls[1]["params"]["per_page"] == 1
+
+
+def test_fetch_stops_paging_once_a_page_returns_fewer_than_requested():
+    """A short page means the search is exhausted - no further page
+    request should be made even if `limit` wasn't fully reached.
+    """
+    api = _MockGitHubAPI()
+    api.search_pages = [_FakeResponse(200, {"items": [_issue(number=1), _issue(number=2)]})]
+
+    with _patch_requests(api):
+        posts = GitHubFetcher(_config()).fetch(FetchQuery(community="ignored", keyword="invoicing", limit=50))
+
+    assert len(posts) == 2
+    search_calls = [call for call in api.calls if call["url"].endswith("/search/issues")]
+    assert len(search_calls) == 1
+
+
+def test_fetch_no_results_raises():
+    api = _MockGitHubAPI()
+    api.search_pages = [_FakeResponse(200, {"items": []})]
 
     with _patch_requests(api):
         with pytest.raises(FetcherError):
             GitHubFetcher(_config()).fetch(FetchQuery(community="ignored", keyword="invoicing", limit=10))
 
 
-def test_fetch_does_not_re_filter_issues_by_literal_keyword():
-    """Real-world regression test: an early version re-applied `keyword`
-    as a manual substring filter on each issue's title/body after
-    fetching, on top of discover_repos() already using it as the
-    GitHub Search API query. Live-tested against real repos found for
-    "invoicing" (invoiceninja/invoiceninja, akaunting/akaunting, etc.)
-    and reverted after confirming it silently zeroed out every result -
-    real issues in those repos (e.g. "Fix PDF export") don't repeat the
-    word "invoicing," so a topically-correct fetch returned 0
-    discussions. Repo-level relevance from discover_repos is the real
-    filter (the same precedent RedditFetcher already set by delegating
-    to subreddit.search() instead of re-filtering); an issue's own text
-    is never required to repeat the search term.
-    """
+def test_fetch_search_rate_limit_exceeded():
     api = _MockGitHubAPI()
-    api.search_response = _FakeResponse(200, {"items": [_repo_item("owner/repo1")]})
-    api.issues_responses["owner/repo1"] = _FakeResponse(
-        200,
-        [
-            _issue(number=1, title="invoicing is broken", body="nothing relevant here"),
-            _issue(number=2, title="Fix PDF export", body="totally unrelated body text"),
-        ],
-    )
+    api.search_pages = [_FakeResponse(403, {})]
 
     with _patch_requests(api):
-        posts = GitHubFetcher(_config()).fetch(FetchQuery(community="ignored", keyword="invoicing", limit=10))
+        with pytest.raises(FetcherRateLimitError):
+            GitHubFetcher(_config()).fetch(FetchQuery(community="ignored", keyword="invoicing", limit=10))
 
-    assert len(posts) == 2
-    assert {post.title for post in posts} == {"invoicing is broken", "Fix PDF export"}
+
+def test_fetch_invalid_keyword():
+    api = _MockGitHubAPI()
+    api.search_pages = [_FakeResponse(422, {})]
+
+    with _patch_requests(api):
+        with pytest.raises(FetcherError):
+            GitHubFetcher(_config()).fetch(FetchQuery(community="ignored", keyword="invoicing", limit=10))
 
 
 # --- Auth header behavior --------------------------------------------------------------
 
 
-def test_fetch_with_token_sets_auth_header_on_search_and_issues_calls():
+def test_fetch_with_token_sets_auth_header_on_search_and_comments_calls():
     api = _MockGitHubAPI()
-    api.search_response = _FakeResponse(200, {"items": [_repo_item("owner/repo1")]})
-    api.issues_responses["owner/repo1"] = _FakeResponse(200, [_issue(number=1)])
+    api.search_pages = [_FakeResponse(200, {"items": [_issue(number=1)]})]
+    api.comments_responses[("owner/repo", 1)] = _FakeResponse(200, [{"body": "a comment"}])
 
     with _patch_requests(api):
         GitHubFetcher(_config(token="real-token-123")).fetch(FetchQuery(community="ignored", keyword="invoicing", limit=5))
@@ -307,33 +245,12 @@ def test_fetch_with_token_sets_auth_header_on_search_and_issues_calls():
 
 def test_fetch_without_token_no_auth_header():
     api = _MockGitHubAPI()
-    api.search_response = _FakeResponse(200, {"items": [_repo_item("owner/repo1")]})
-    api.issues_responses["owner/repo1"] = _FakeResponse(200, [_issue(number=1)])
+    api.search_pages = [_FakeResponse(200, {"items": [_issue(number=1)]})]
 
     with _patch_requests(api):
         posts = GitHubFetcher(_config(token=None)).fetch(FetchQuery(community="ignored", keyword="invoicing", limit=5))
 
     assert all("Authorization" not in call["headers"] for call in api.calls)
-    assert len(posts) == 1
-
-
-def test_fetch_invalid_token_on_issues_call_is_skipped_not_raised():
-    """401 on a per-repo issue fetch is still just a fetch failure for
-    that one repo - see error-handling spec ("individual repo fetch
-    fails -> skip, continue"). Only a fully-invalid search-level token
-    would surface as FetcherAuthError from discover_repos itself
-    (GitHub's search endpoint doesn't 401 on a bad-but-present token in
-    practice; this documents the actual, current behavior instead of
-    an untested assumption).
-    """
-    api = _MockGitHubAPI()
-    api.search_response = _FakeResponse(200, {"items": [_repo_item("owner/bad"), _repo_item("owner/good")]})
-    api.issues_responses["owner/bad"] = _FakeResponse(401, {})
-    api.issues_responses["owner/good"] = _FakeResponse(200, [_issue(number=1)])
-
-    with _patch_requests(api):
-        posts = GitHubFetcher(_config(token="bad-token")).fetch(FetchQuery(community="ignored", keyword="invoicing", limit=10))
-
     assert len(posts) == 1
 
 
@@ -346,19 +263,19 @@ def test_discussion_field_mapping():
         title="invoicing takes too long",
         body="invoicing body text",
         login="some_user",
-        html_url="https://github.com/owner/repo/issues/42",
+        repo="owner/repo",
         created_at="2026-03-15T10:30:00Z",
         plus_one=3,
         heart=2,
     )
     api = _MockGitHubAPI()
-    api.search_response = _FakeResponse(200, {"items": [_repo_item("owner/repo")]})
-    api.issues_responses["owner/repo"] = _FakeResponse(200, [issue])
+    api.search_pages = [_FakeResponse(200, {"items": [issue]})]
 
     with _patch_requests(api):
         posts = GitHubFetcher(_config()).fetch(FetchQuery(community="ignored", keyword="invoicing", limit=1))
 
     post = posts[0]
+    assert post.id == "owner/repo#42"
     assert post.title == "invoicing takes too long"
     assert "invoicing body text" in post.text
     assert post.url == "https://github.com/owner/repo/issues/42"
@@ -367,3 +284,15 @@ def test_discussion_field_mapping():
     assert post.source == "github"
     assert post.is_mock is False
     assert post.created_at.year == 2026 and post.created_at.month == 3 and post.created_at.day == 15
+
+
+def test_comments_are_folded_into_post_text():
+    api = _MockGitHubAPI()
+    api.search_pages = [_FakeResponse(200, {"items": [_issue(number=1, repo="owner/repo")]})]
+    api.comments_responses[("owner/repo", 1)] = _FakeResponse(200, [{"body": "first comment"}, {"body": "second comment"}])
+
+    with _patch_requests(api):
+        posts = GitHubFetcher(_config()).fetch(FetchQuery(community="ignored", keyword="invoicing", limit=1))
+
+    assert "first comment" in posts[0].text
+    assert "second comment" in posts[0].text

@@ -130,6 +130,7 @@ def _run_and_build_response(request: AnalyzeRequest, *, force_mock: bool) -> Ana
         subreddit=request.subreddit,
         keyword=request.keyword,
         post_limit=request.limit,
+        num_reports=request.num_reports,
         output_dir=_OUTPUT_DIR,
         ai_provider="mock" if force_mock else "auto",
         report_format=request.report_format,
