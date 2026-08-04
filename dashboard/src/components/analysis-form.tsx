@@ -13,6 +13,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ErrorState } from "@/components/error-state";
 import { AnalysisResultSkeleton } from "@/components/skeletons/analysis-result-skeleton";
+import { AnalysisProgress } from "@/components/analysis-progress";
 import { api } from "@/lib/api/client";
 import type { AnalyzeRequest, AnalyzeResponse, Source } from "@/lib/api/types";
 import { getDefaultMockMode } from "@/lib/settings";
@@ -70,9 +71,63 @@ export function AnalysisForm() {
 
   const [fieldErrors, setFieldErrors] = React.useState<FieldErrors>({});
 
-  const [isSubmitting, setIsSubmitting] = React.useState(false);
+  // "idle" | "streaming" (real-time SSE progress UI) | "post" (the
+  // original blocking POST /analyze path, used both as the resting
+  // fallback and while a run is actually happening on that path).
+  const [runMode, setRunMode] = React.useState<"idle" | "streaming" | "post">("idle");
+  const isSubmitting = runMode !== "idle";
   const [result, setResult] = React.useState<AnalyzeResponse | null>(null);
   const [error, setError] = React.useState<unknown>(null);
+
+  function buildPayload(): AnalyzeRequest {
+    // GitHub has no mock equivalent (force_mock always returns Reddit's
+    // MockFetcher regardless of source - see src/fetchers/__init__.py),
+    // so a GitHub run always hits the real POST /analyze endpoint.
+    return source === "github"
+      ? {
+          source: "github",
+          keyword: keyword.trim(),
+          limit: Number(limit),
+          use_cache: useCache,
+          report_format: "both",
+        }
+      : {
+          subreddit: subreddit.trim(),
+          keyword: keyword.trim() || null,
+          limit: Number(limit),
+          use_cache: useCache,
+          report_format: "both",
+        };
+  }
+
+  function handleAnalysisComplete(response: AnalyzeResponse) {
+    setResult(response);
+    if (response.report_id && response.report) {
+      cacheFreshReport(response.report_id, response.report);
+    }
+    if (!response.summary.succeeded) {
+      toast.error("Analysis finished with errors - see details below.");
+    } else {
+      toast.success("Analysis complete.");
+    }
+    setRunMode("idle");
+  }
+
+  function handleAnalysisError(err: unknown) {
+    setError(err);
+    toast.error("Analysis failed to run.");
+    setRunMode("idle");
+  }
+
+  async function runViaPost() {
+    setRunMode("post");
+    try {
+      const response = await api.analyze(buildPayload(), source === "github" ? false : mockMode);
+      handleAnalysisComplete(response);
+    } catch (err) {
+      handleAnalysisError(err);
+    }
+  }
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
@@ -89,47 +144,24 @@ export function AnalysisForm() {
       return;
     }
 
-    setIsSubmitting(true);
     setError(null);
     setResult(null);
 
-    // GitHub has no mock equivalent (force_mock always returns Reddit's
-    // MockFetcher regardless of source - see src/fetchers/__init__.py),
-    // so a GitHub run always hits the real POST /analyze endpoint.
-    const payload: AnalyzeRequest =
-      source === "github"
-        ? {
-            source: "github",
-            keyword: keyword.trim(),
-            limit: Number(limit),
-            use_cache: useCache,
-            report_format: "both",
-          }
-        : {
-            subreddit: subreddit.trim(),
-            keyword: keyword.trim() || null,
-            limit: Number(limit),
-            use_cache: useCache,
-            report_format: "both",
-          };
-
-    try {
-      const response = await api.analyze(payload, source === "github" ? false : mockMode);
-      setResult(response);
-      if (response.report_id && response.report) {
-        cacheFreshReport(response.report_id, response.report);
-      }
-      if (!response.summary.succeeded) {
-        toast.error("Analysis finished with errors - see details below.");
-      } else {
-        toast.success("Analysis complete.");
-      }
-    } catch (err) {
-      setError(err);
-      toast.error("Analysis failed to run.");
-    } finally {
-      setIsSubmitting(false);
+    // GET /analyze/stream has no mock variant (see
+    // src/api/routes.py::analyze_stream's own docstring) - a mock-mode
+    // Reddit run keeps using the existing, near-instant POST
+    // /analyze/mock path instead of silently ignoring the user's mock
+    // toggle by streaming a real/auto run in its place. EventSource is
+    // also only ever checked here, inside this event handler - never in
+    // render, which would risk a server/client hydration mismatch since
+    // EventSource doesn't exist during server rendering at all.
+    const shouldStream = source === "github" || !mockMode;
+    if (!shouldStream || typeof EventSource === "undefined") {
+      await runViaPost();
+      return;
     }
+
+    setRunMode("streaming");
   }
 
   return (
@@ -268,7 +300,27 @@ export function AnalysisForm() {
         </CardContent>
       </Card>
 
-      {isSubmitting ? <AnalysisResultSkeleton /> : null}
+      {runMode === "streaming" ? (
+        <AnalysisProgress
+          keyword={keyword.trim()}
+          source={source}
+          limit={Number(limit)}
+          useCache={useCache}
+          subreddit={subreddit.trim()}
+          onComplete={handleAnalysisComplete}
+          onError={(message) => {
+            // A lost/failed SSE connection falls back to the existing,
+            // reliable POST /analyze path rather than just leaving the
+            // user stuck - but the real reason is still shown, not
+            // swallowed, since exact backend/connection text matters.
+            toast.error(message);
+            void runViaPost();
+          }}
+          onUnsupported={() => void runViaPost()}
+        />
+      ) : null}
+
+      {runMode === "post" ? <AnalysisResultSkeleton /> : null}
 
       {!isSubmitting && error ? <ErrorState error={error} onRetry={() => setError(null)} /> : null}
 

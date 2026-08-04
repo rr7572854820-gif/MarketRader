@@ -20,8 +20,25 @@ import type {
   HealthResponse,
   ReportDetail,
   ReportListItem,
+  Source,
   VersionResponse,
 } from "@/lib/api/types";
+
+/** Query params GET /analyze/stream accepts - a curated subset of
+ * AnalyzeRequest's fields (no num_reports/report_format), matching
+ * exactly what the backend endpoint itself takes as query parameters
+ * (see src/api/routes.py::analyze_stream). subreddit is included even
+ * though it wasn't in this feature's original prop list - source="reddit"
+ * needs it to target the right subreddit; dropping it would silently
+ * ignore the user's actual choice.
+ */
+export interface AnalyzeStreamParams {
+  keyword?: string | null;
+  source?: Source;
+  limit: number;
+  use_cache: boolean;
+  subreddit?: string;
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const baseUrl = getApiBaseUrl();
@@ -89,4 +106,22 @@ export const api = {
    * just builds the correct, base-URL-aware URL for that.
    */
   downloadUrl: (reportId: string): string => `${getApiBaseUrl()}/download/${encodeURIComponent(reportId)}`,
+
+  /** GET /analyze/stream is not fetched via request() above - it's an
+   * SSE endpoint, consumed by the browser's native EventSource, which
+   * takes a URL string and manages the connection/parsing itself
+   * (never a JSON response body the way every other method here
+   * returns). This still keeps URL construction in the one module
+   * that's supposed to know it, rather than a component building
+   * `${getApiBaseUrl()}/analyze/stream?...` itself.
+   */
+  streamUrl: (params: AnalyzeStreamParams): string => {
+    const url = new URL(`${getApiBaseUrl()}/analyze/stream`);
+    if (params.keyword) url.searchParams.set("keyword", params.keyword);
+    if (params.source) url.searchParams.set("source", params.source);
+    url.searchParams.set("limit", String(params.limit));
+    url.searchParams.set("use_cache", String(params.use_cache));
+    if (params.subreddit) url.searchParams.set("subreddit", params.subreddit);
+    return url.toString();
+  },
 };
