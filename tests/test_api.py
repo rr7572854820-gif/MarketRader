@@ -290,6 +290,84 @@ def test_analyze_mock_endpoint_forces_mock_even_with_stubbed_pipeline(client: Te
     assert config.force_mock_fetch is True
 
 
+# --- GET /analyze/stream (SSE) ------------------------------------------------------
+
+
+class _ProgressEmittingPipelineStub:
+    """Stands in for src.api.routes.Pipeline for /analyze/stream tests -
+    same reasoning as _RecordingPipelineStub above (never risk a real
+    network/AI call in a test), extended to also exercise the
+    on_progress callback path: calls it with a few canned, realistic
+    events (ending at 100) instead of doing any real fetch/AI/
+    clustering work.
+    """
+
+    def __init__(self, config) -> None:
+        self._config = config
+
+    def run(self, on_progress=None) -> PipelineRunResult:
+        if on_progress:
+            on_progress("fetch", "🔍 Searching...", 5)
+            on_progress("fetch", "✅ Fetched 3 real discussions", 35)
+            on_progress("done", "🎉 Done! Found 1 opportunities in 0.1s", 100)
+        return _canned_result()
+
+
+def _sse_data_events(response_text: str) -> list:
+    return [json.loads(line[len("data: ") :]) for line in response_text.splitlines() if line.startswith("data: ")]
+
+
+def test_sse_returns_stream(client: TestClient, monkeypatch):
+    monkeypatch.setattr(routes, "Pipeline", _ProgressEmittingPipelineStub)
+    response = client.get("/analyze/stream", params={"subreddit": "startups"})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+
+
+def test_sse_sends_valid_json(client: TestClient, monkeypatch):
+    monkeypatch.setattr(routes, "Pipeline", _ProgressEmittingPipelineStub)
+    response = client.get("/analyze/stream", params={"subreddit": "startups"})
+
+    events = _sse_data_events(response.text)  # json.loads raises if any line isn't valid JSON
+    assert len(events) == 3
+
+
+def test_sse_percent_field_present(client: TestClient, monkeypatch):
+    monkeypatch.setattr(routes, "Pipeline", _ProgressEmittingPipelineStub)
+    response = client.get("/analyze/stream", params={"subreddit": "startups"})
+
+    events = _sse_data_events(response.text)
+    assert len(events) > 0
+    for event in events:
+        assert "percent" in event
+        assert isinstance(event["percent"], int)
+        assert "stage" in event
+        assert "message" in event
+
+
+def test_sse_ends_with_100(client: TestClient, monkeypatch):
+    monkeypatch.setattr(routes, "Pipeline", _ProgressEmittingPipelineStub)
+    response = client.get("/analyze/stream", params={"subreddit": "startups"})
+
+    events = _sse_data_events(response.text)
+    assert events[-1]["percent"] == 100
+
+
+def test_sse_rejects_blank_subreddit(client: TestClient, monkeypatch):
+    monkeypatch.setattr(routes, "Pipeline", _ProgressEmittingPipelineStub)
+    response = client.get("/analyze/stream", params={"subreddit": "   "})
+
+    assert response.status_code == 422
+
+
+def test_sse_github_requires_keyword(client: TestClient, monkeypatch):
+    monkeypatch.setattr(routes, "Pipeline", _ProgressEmittingPipelineStub)
+    response = client.get("/analyze/stream", params={"source": "github"})
+
+    assert response.status_code == 422
+
+
 # --- GET /reports, GET /reports/{id}, GET /download/{id} ---------------------------
 
 

@@ -32,6 +32,7 @@ here (see _find_report_id_for).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -39,7 +40,8 @@ from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import ValidationError
 
 from src.api.models import (
     AnalyzeRequest,
@@ -51,6 +53,7 @@ from src.api.models import (
     ProjectHealthModel,
     ReportDetail,
     ReportListItem,
+    Source,
     VersionResponse,
 )
 from src.config import load_config
@@ -123,6 +126,110 @@ def analyze_mock(request: AnalyzeRequest) -> AnalyzeResponse:
     cost. Equivalent to `python -m src.pipeline.runner --mock`.
     """
     return _run_and_build_response(request, force_mock=True)
+
+
+_SSE_KEEPALIVE_SECONDS = 15.0
+
+
+@router.get("/analyze/stream", tags=["analyze"])
+async def analyze_stream(
+    keyword: Optional[str] = Query(default=None),
+    source: Source = Query(default="reddit"),
+    limit: int = Query(default=25, ge=1, le=100),
+    use_cache: bool = Query(default=True),
+    subreddit: str = Query(default="all"),
+) -> StreamingResponse:
+    """Server-Sent Events variant of POST /analyze: streams
+    Pipeline.run()'s on_progress callback live (see
+    src/pipeline/pipeline.py) instead of blocking silently for the
+    whole run and returning one JSON body at the end.
+
+    GET with query parameters, not POST with a JSON body like
+    POST /analyze - a real technical constraint, not a style choice:
+    the browser's native EventSource API (the standard SSE consumer)
+    only supports GET requests with no custom body.
+
+    Accepts the same validation AnalyzeRequest already enforces
+    (blank subreddit rejected, keyword required for source="github",
+    limit capped at 100) by constructing one internally from these
+    query parameters rather than duplicating those rules here.
+
+    Only progress events are streamed - the final AnalyzeResponse
+    (report_id, the full InsightReport) is NOT sent over this stream.
+    A consumer that needs those still has to call POST /analyze or
+    GET /reports/{report_id} separately once the stream ends. Named
+    limitation, not fixed here - out of this task's scope.
+
+    "auto" semantics only (real if configured, mock fallback
+    otherwise), matching POST /analyze - no /analyze/stream/mock
+    variant exists, since one wasn't requested.
+    """
+    try:
+        request = AnalyzeRequest(keyword=keyword, source=source, limit=limit, use_cache=use_cache, subreddit=subreddit)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    config = PipelineConfig(
+        subreddit=request.subreddit,
+        keyword=request.keyword,
+        post_limit=request.limit,
+        output_dir=_OUTPUT_DIR,
+        ai_provider="auto",
+        report_format=request.report_format,
+        force_mock_fetch=False,
+        cache_enabled=request.use_cache,
+        source=request.source,
+    )
+
+    async def event_generator():
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def on_progress(stage: str, message: str, percent: int) -> None:
+            # Called from the executor thread running Pipeline.run()
+            # below, never from this coroutine's own thread -
+            # asyncio.Queue is documented as not thread-safe, so this
+            # handoff must go through call_soon_threadsafe rather than
+            # a direct queue.put_nowait() from that other thread.
+            loop.call_soon_threadsafe(queue.put_nowait, {"stage": stage, "message": message, "percent": percent})
+
+        async def run_pipeline() -> None:
+            try:
+                await loop.run_in_executor(None, lambda: Pipeline(config).run(on_progress=on_progress))
+            finally:
+                # Always signal the end of the stream, even if
+                # something above raised unexpectedly - Pipeline.run()
+                # itself is documented to never raise, but this
+                # guarantees the generator below still terminates
+                # instead of hanging open indefinitely.
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+
+        task = asyncio.create_task(run_pipeline())
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=_SSE_KEEPALIVE_SECONDS)
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+                    continue
+                if event is None:
+                    break
+                yield f"data: {json.dumps(event)}\n\n"
+        finally:
+            # Best-effort only if the client disconnects early: Python
+            # cannot forcibly interrupt a thread already running inside
+            # run_in_executor, so a cancelled task's underlying
+            # Pipeline.run() call keeps running to completion in the
+            # background regardless - this only stops this generator's
+            # own bookkeeping, not the real work. Named limitation.
+            if not task.done():
+                task.cancel()
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 def _run_and_build_response(request: AnalyzeRequest, *, force_mock: bool) -> AnalyzeResponse:
