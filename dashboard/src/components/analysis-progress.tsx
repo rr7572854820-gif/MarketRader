@@ -223,15 +223,23 @@ export function AnalysisProgress({
       <CardHeader>
         <div className="flex items-baseline justify-between gap-4">
           <CardTitle>{isComplete ? "Finishing up…" : "Analyzing…"}</CardTitle>
-          <span className="shrink-0 text-sm tabular-nums text-muted-foreground">
-            {currentPercent}% · {elapsedSeconds}s
+          <span className="shrink-0 font-mono text-sm tabular-nums text-muted-foreground">
+            {/* key={currentPercent} retriggers the fade on every change - a
+             * smooth-feeling update without adding interpolation state
+             * (the literal "React state update every 100ms" spec would
+             * be a logic change; this stays pure CSS, same technique as
+             * the stage label below). */}
+            <span key={currentPercent} className="analysis-progress-percent">
+              {currentPercent}%
+            </span>{" "}
+            · {elapsedSeconds}s
           </span>
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
           <div
-            className="h-full rounded-full bg-primary transition-[width]"
+            className="analysis-progress-bar-fill h-full rounded-full bg-primary"
             style={{ width: `${currentPercent}%` }}
             role="progressbar"
             aria-valuenow={currentPercent}
@@ -240,14 +248,18 @@ export function AnalysisProgress({
           />
         </div>
 
-        {currentStageLabel ? <p className="text-sm font-semibold">Stage: {currentStageLabel}</p> : null}
+        {currentStageLabel ? (
+          <p key={currentStage} className="analysis-progress-stage-label text-sm font-semibold">
+            Stage: {currentStageLabel}
+          </p>
+        ) : null}
 
         <div ref={logRef} className="max-h-40 space-y-1 overflow-y-auto rounded-md bg-muted/50 p-3">
           {visibleMessages.length === 0 ? (
             <p className="font-mono text-xs text-muted-foreground">Waiting for the analysis to start…</p>
           ) : (
             visibleMessages.map((m, i) => (
-              <p key={`${m.time}-${i}`} className="font-mono text-xs text-foreground">
+              <p key={`${m.time}-${i}`} className="analysis-progress-message font-mono text-xs text-foreground">
                 {m.message}
               </p>
             ))
