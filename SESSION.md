@@ -47,6 +47,35 @@ Ideas worth considering later, explicitly not committed to now.
 
 ## Session Log
 
+## Session — 2026-08-01 (BaseFetcher: parallel fetch + content truncation helpers)
+
+### Current Objective
+Add a `BaseFetcher` class on top of the existing `Fetcher` ABC in `src/fetchers/base.py` — an opt-in intermediate base providing `fetch_parallel()` (thread-pool fan-out for I/O-bound HTTP fetches) and `truncate_content()` (a bounded content length with a visible truncation marker), addressing a gap already named in `ENGINEERING_GUIDE.md`'s Performance Guidelines ("No async/parallel fetching anywhere... no rate-limit budget tracking"). Explicitly additive-only this task: no existing fetcher migrates onto it yet.
+
+### Completed Work
+- Verified premises before writing anything (per the task's own instruction): `Fetcher(ABC)`'s exact signature confirmed unchanged (`fetch(self, query: FetchQuery) -> List[FetchedPost]`, raises only `FetcherError`); `GitHubFetcher` confirmed to inherit `Fetcher` directly, unaffected; `src/fetchers/hn_fetcher.py` does not exist (the task's boundary mentioning it was moot, not a conflict); all existing fetcher tests read (`tests/fetchers/test_github_fetcher.py`, `tests/test_fetchers.py`).
+- `BaseFetcher(Fetcher)` added to `src/fetchers/base.py` — still abstract (does not implement `fetch()`, so it can't be instantiated directly, same as plain `Fetcher`). `MAX_WORKERS`/`MAX_CONTENT_LENGTH`/`FETCH_TIMEOUT` class constants, `truncate_content()`, `fetch_parallel()` (per-item exception isolation via a wrapped `safe_fetch` closure - a failed item logs a warning and contributes `[]`, never aborts the batch, the same per-item resilience principle `Pipeline._analyze` already follows for extraction failures). Given pseudocode was verified correct by inspection before implementing (exceptions caught inside the mapped function so `ThreadPoolExecutor.map()` never raises; `list(executor.map(...))` correctly forces full completion) - no bugs found this time, unlike several earlier tasks this session.
+- 7 new tests in `tests/fetchers/test_base_fetcher.py`, via a minimal concrete `_ConcreteFetcher(BaseFetcher)` subclass (BaseFetcher itself can't be instantiated - `fetch()` stays abstract). Full suite 220 → **227**, zero existing tests broken.
+- Confirmed `python -c "from src.fetchers.base import BaseFetcher; ..."` imports cleanly and lists exactly the expected public methods/constants.
+
+### Known Issues / Named Limitations
+- `BaseFetcher` is not yet used by any real fetcher - `GitHubFetcher`/`RedditFetcher`/`MockFetcher` all still inherit plain `Fetcher` unchanged, deliberately (explicit task boundary: "do not touch github_fetcher.py yet"). `fetch_parallel()` has no call site yet.
+- `FETCH_TIMEOUT` is defined as a class constant but not yet wired into anything - no HTTP call in this codebase reads it yet (a future migration's job, not this task's).
+
+### Important Decisions
+- Implemented the task's given `BaseFetcher` code essentially as specified, after verifying it against `Fetcher`'s real interface and confirming no bugs - the one deliberate deviation is `logger.warning("...%s...", item, exc)` (lazy %-style formatting) instead of the given f-string, matching this codebase's existing logging convention everywhere else (e.g. `pipeline.py`), not a correctness fix.
+
+### Next Tasks
+- A future task should pick one real fetcher (most plausibly `GitHubFetcher`, since it already does N sequential per-issue comment fetches) to actually migrate onto `BaseFetcher` and exercise `fetch_parallel()`/`truncate_content()` for real, per this task's own "existing fetchers migrate gradually" framing.
+
+### Questions
+None new.
+
+### Lessons Learned
+- Not every task's given pseudocode has a bug - this session has repeatedly found real ones (a decommissioned model name, a thread-unsafe queue write, a greedy regex, a placeholder log value), which made it worth explicitly re-verifying this one with the same scrutiny rather than assuming based on that pattern. It checked out clean; said so plainly instead of manufacturing a concern to seem thorough.
+
+---
+
 ## Session — 2026-08-01 (Smart adaptive oversampling: calculate_fetch_limit)
 
 ### Current Objective
