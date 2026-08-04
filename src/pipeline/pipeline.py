@@ -30,7 +30,7 @@ import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from src.ai import get_ai_provider
 from src.ai.base import AIProvider
@@ -50,6 +50,13 @@ from src.verification.models import VerificationReport
 from src.verification.verifier import Verifier
 
 logger = logging.getLogger(__name__)
+
+# (stage, message, percent) - stage is one of "fetch"/"analyze"/
+# "cluster"/"verify"/"report"/"done"; percent is 0-100, non-decreasing
+# across one run() call. Optional and purely additive: run() behaves
+# identically whether or not a caller passes one. No SSE, no HTTP, no
+# frontend wiring - see Pipeline.run()'s on_progress parameter.
+ProgressCallback = Callable[[str, str, int], None]
 
 _FETCH_MAX_ATTEMPTS = 3
 _FETCH_BASE_DELAY_SECONDS = 1.0
@@ -270,7 +277,33 @@ class Pipeline:
     def __init__(self, config: PipelineConfig) -> None:
         self._config = config
 
-    def run(self) -> PipelineRunResult:
+    def _emit(self, on_progress: Optional[ProgressCallback], stage: str, message: str, percent: int) -> None:
+        if on_progress:
+            on_progress(stage, message, percent)
+
+    def run(self, on_progress: Optional[ProgressCallback] = None) -> PipelineRunResult:
+        """Runs the pipeline. on_progress, if given, is called at each
+        major stage transition with (stage, message, percent) - purely
+        observational, optional, and never affects what the run
+        actually does; a caller that passes nothing gets identical
+        behavior to before this parameter existed.
+
+        Not fired for GitHub's fetch internals specifically (repo
+        discovery / per-repo issue counts): GitHubFetcher no longer has
+        a repo-discovery step or a per-repo loop at all (see its own
+        module docstring - replaced by a single Search Issues API call
+        across all of GitHub), so there is no real per-repo progress
+        for run() to observe here without threading a callback through
+        GitHubFetcher's own fetch() signature (and the shared Fetcher
+        interface) - out of this method's scope. Only fetch() start/end
+        are reported, honestly, from what run() actually knows.
+
+        Only the first (main) fetch/analyze/cluster pass reports
+        progress - a GitHub num_reports oversample round (see
+        _oversample_for_report_count), when it happens, does not, so
+        that percent stays non-decreasing within one run() call rather
+        than resetting partway through a rare, variable-length retry.
+        """
         start_time = datetime.now(timezone.utc)
         errors: List[str] = []
         posts: List[FetchedPost] = []
@@ -339,21 +372,30 @@ class Pipeline:
                     )
             query = FetchQuery(community=community, keyword=search_keyword, limit=initial_limit)
 
+            if self._config.source == "github":
+                self._emit(on_progress, "fetch", f"🔍 Searching GitHub for '{search_keyword}'...", 5)
+            else:
+                self._emit(on_progress, "fetch", f"🔍 Fetching discussions from {community}...", 5)
             posts = self._fetch(fetcher, query, errors)
-            insights = self._analyze(posts, active_provider, errors)
-            clusters = self._cluster(insights, active_provider, errors)
+            self._emit(on_progress, "fetch", f"✅ Fetched {len(posts)} real discussions", 35)
+
+            insights = self._analyze(posts, active_provider, errors, on_progress)
+            clusters = self._cluster(insights, active_provider, errors, on_progress)
 
             if self._should_oversample(clusters, initial_limit):
+                # No on_progress here - see run()'s own docstring on why
+                # only the main pass reports progress.
                 posts, insights, clusters = self._oversample_for_report_count(
                     fetcher, community, search_keyword, posts, len(clusters), active_provider, errors
                 )
 
-            verification_report = self._verify(insights, posts)
+            verification_report = self._verify(insights, posts, on_progress)
             ai_calls_made = counting_provider.call_count
             if caching_provider is not None:
                 cache_hits = caching_provider.hits
                 cache_misses = caching_provider.misses
 
+            self._emit(on_progress, "report", "📝 Generating final report...", 95)
             insight_report = generate_report(clusters, verification_report, posts, ai_provider_label)
             if self._config.source == "github" and self._config.num_reports:
                 if len(insight_report.top_opportunities) < self._config.num_reports:
@@ -418,6 +460,17 @@ class Pipeline:
             summary.cache_misses,
             summary.clusters_found,
             len(summary.errors),
+        )
+        # Fires unconditionally, even on a failed run (succeeded=False)
+        # - a progress UI should always get a terminal event so it
+        # knows the run has actually finished, not hung; num_opportunities
+        # is honestly 0 whenever insight_report was never produced.
+        num_opportunities = len(insight_report.top_opportunities) if insight_report is not None else 0
+        self._emit(
+            on_progress,
+            "done",
+            f"🎉 Done! Found {num_opportunities} opportunities in {summary.duration_seconds:.1f}s",
+            100,
         )
         return PipelineRunResult(summary=summary, report=insight_report)
 
@@ -507,15 +560,29 @@ class Pipeline:
         return posts
 
     def _analyze(
-        self, posts: List[FetchedPost], ai_provider: AIProvider, errors: List[str]
+        self,
+        posts: List[FetchedPost],
+        ai_provider: AIProvider,
+        errors: List[str],
+        on_progress: Optional[ProgressCallback] = None,
     ) -> List[DiscussionInsight]:
         if not posts:
             return []
         extractor = Extractor(ai_provider)
         insights: List[DiscussionInsight] = []
-        for post in posts:
+        total = len(posts)
+        # 40-65% distributed evenly by position in `posts`, not by how
+        # many have succeeded so far - keeps percent tied to "how far
+        # through the input we are" regardless of extraction outcome,
+        # so it can't move unpredictably slower/faster with the success
+        # rate (and stays trivially non-decreasing either way).
+        for i, post in enumerate(posts):
+            self._emit(on_progress, "analyze", f"🤖 Analyzing discussion {i + 1}/{total}...", 40 + round(25 * i / total))
             try:
-                insights.append(extractor.extract(post))
+                insight = extractor.extract(post)
+                insights.append(insight)
+                title = (post.title or post.url)[:50]
+                self._emit(on_progress, "analyze", f"💡 Extracted insights from {title}", 40 + round(25 * (i + 1) / total))
             except InsightExtractionError as exc:
                 message = f"Extraction failed for {post.url}: {exc}"
                 errors.append(message)
@@ -524,10 +591,15 @@ class Pipeline:
         return insights
 
     def _cluster(
-        self, insights: List[DiscussionInsight], ai_provider: AIProvider, errors: List[str]
+        self,
+        insights: List[DiscussionInsight],
+        ai_provider: AIProvider,
+        errors: List[str],
+        on_progress: Optional[ProgressCallback] = None,
     ) -> List[OpportunityCluster]:
         if not insights:
             return []
+        self._emit(on_progress, "cluster", f"🔗 Clustering {len(insights)} insights...", 70)
         aggregator = Aggregator(ai_provider)
         clusters = aggregator.aggregate(insights)
         if aggregator.last_method == "lexical_fallback":
@@ -537,15 +609,23 @@ class Pipeline:
             )
             errors.append(message)
             logger.warning(message)
+        self._emit(on_progress, "cluster", f"📊 Found {len(clusters)} opportunity clusters", 80)
         logger.info("Grouped into %d cluster(s) via %s.", len(clusters), aggregator.last_method)
         return clusters
 
-    def _verify(self, insights: List[DiscussionInsight], posts: List[FetchedPost]) -> VerificationReport:
+    def _verify(
+        self,
+        insights: List[DiscussionInsight],
+        posts: List[FetchedPost],
+        on_progress: Optional[ProgressCallback] = None,
+    ) -> VerificationReport:
         if not insights:
             return VerificationReport(
                 total_claims=0, verified_count=0, partial_count=0, unverified_count=0, verification_rate=0.0, results=[]
             )
+        self._emit(on_progress, "verify", "✔️ Verifying evidence and quotes...", 85)
         report = Verifier().verify_all(insights, posts)
+        self._emit(on_progress, "verify", f"✔️ Verification complete — {report.verified_count} verified", 90)
         logger.info(
             "Verified %d claim(s): %.1f%% verified, %d partial, %d unverified.",
             report.total_claims,

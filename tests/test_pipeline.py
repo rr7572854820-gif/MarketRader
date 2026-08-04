@@ -764,6 +764,97 @@ def test_pipeline_never_raises_on_unexpected_internal_failure(tmp_path: Path, mo
     assert result.report is None
 
 
+# --- Progress callback (Pipeline.run(on_progress=...)) ------------------------------
+
+
+def test_progress_callback_fires(tmp_path: Path):
+    calls: List[tuple] = []
+
+    def on_progress(stage: str, message: str, percent: int) -> None:
+        calls.append((stage, message, percent))
+
+    config = PipelineConfig(
+        subreddit="test", post_limit=3, output_dir=tmp_path, ai_provider="mock", force_mock_fetch=True
+    )
+    Pipeline(config).run(on_progress=on_progress)
+
+    assert len(calls) >= 5
+    assert all(isinstance(stage, str) and isinstance(message, str) and isinstance(percent, int) for stage, message, percent in calls)
+
+
+def test_progress_percent_increases(tmp_path: Path):
+    percents: List[int] = []
+
+    def on_progress(stage: str, message: str, percent: int) -> None:
+        percents.append(percent)
+
+    config = PipelineConfig(
+        subreddit="test", post_limit=5, output_dir=tmp_path, ai_provider="mock", force_mock_fetch=True
+    )
+    Pipeline(config).run(on_progress=on_progress)
+
+    assert percents == sorted(percents)  # never decreases
+    assert percents[0] >= 1
+    assert percents[-1] == 100
+
+
+def test_no_callback_doesnt_break(tmp_path: Path):
+    config = PipelineConfig(
+        subreddit="test", post_limit=3, output_dir=tmp_path, ai_provider="mock", force_mock_fetch=True
+    )
+
+    result = Pipeline(config).run()  # on_progress omitted entirely - must not raise
+
+    assert result.summary.succeeded is True
+
+
+def test_progress_callback_reports_correct_final_counts(tmp_path: Path):
+    events: List[tuple] = []
+
+    def on_progress(stage: str, message: str, percent: int) -> None:
+        events.append((stage, message, percent))
+
+    config = PipelineConfig(
+        subreddit="test", post_limit=3, output_dir=tmp_path, ai_provider="mock", force_mock_fetch=True
+    )
+    result = Pipeline(config).run(on_progress=on_progress)
+
+    assert events[0][2] == 5  # fetch start
+    assert events[-1] == ("done", f"🎉 Done! Found {len(result.report.top_opportunities)} opportunities in {result.summary.duration_seconds:.1f}s", 100)
+    stages_seen = {stage for stage, _, _ in events}
+    assert stages_seen == {"fetch", "analyze", "cluster", "verify", "report", "done"}
+
+
+def test_progress_callback_not_fired_during_oversample_round(tmp_path: Path, monkeypatch):
+    """Documented, deliberate limitation (see run()'s own docstring):
+    only the main pass reports progress, not a GitHub num_reports
+    oversample round - this proves that choice actually holds, not
+    just that it's written down.
+    """
+    fetcher = _AvailablePostsFetcher(available=3)
+    _patch_github_fetch_and_clustering(monkeypatch, fetcher, MockAIProvider())
+
+    events: List[tuple] = []
+
+    def on_progress(stage: str, message: str, percent: int) -> None:
+        events.append((stage, message, percent))
+
+    config = PipelineConfig(
+        source="github",
+        keyword="invoicing",
+        post_limit=50,
+        num_reports=10,  # more than the 3 available -> triggers exactly one oversample round
+        output_dir=tmp_path,
+        ai_provider="mock",
+        cache_path=tmp_path / "ai_cache.json",
+    )
+    Pipeline(config).run(on_progress=on_progress)
+
+    assert fetcher.calls == [30, 50]  # confirms the oversample round really happened
+    percents = [percent for _, _, percent in events]
+    assert percents == sorted(percents)  # still never decreases despite the extra round
+
+
 # --- CLI ----------------------------------------------------------------------
 
 
