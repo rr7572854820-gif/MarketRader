@@ -40,13 +40,13 @@ from src.fetchers import FetcherError, get_fetcher
 from src.fetchers.base import Fetcher
 from src.insights.aggregator import Aggregator
 from src.insights.extractor import Extractor
-from src.insights.keyword_extraction import extract_search_terms
 from src.insights.models import DiscussionInsight, OpportunityCluster
 from src.models import FetchedPost, FetchQuery
 from src.pipeline.cache import CachingAIProvider, ResponseCache
 from src.reporting.formatter import save_markdown_file
 from src.reporting.models import InsightReport
 from src.reporting.report_generator import generate_report
+from src.search.query_expander import QueryExpander
 from src.verification.models import VerificationReport
 from src.verification.verifier import Verifier
 
@@ -135,13 +135,13 @@ class PipelineConfig:
             this value drives its entire GitHub Search Issues API
             query. Unlike Reddit's keyword, this one is never passed
             to GitHubFetcher verbatim - run() first sends it through
-            src.insights.keyword_extraction.extract_search_terms
-            (using this run's own AI provider) to turn free-text,
-            natural-language input (e.g. "problems with invoice
-            automation") into a short technical search query
-            ("invoicing automation") before it ever reaches
-            GitHubFetcher, which still receives only a plain keyword
-            string and has no idea this happened - see that module's
+            src.search.query_expander.QueryExpander (using this run's
+            own AI provider) to turn free-text, natural-language input
+            (e.g. "problems with invoice automation") into several
+            related short technical search terms, of which only the
+            first is currently used ("invoicing saas") before it ever
+            reaches GitHubFetcher, which still receives only a plain
+            keyword string and has no idea this happened - see that module's
             docstring for why extraction lives in the pipeline layer,
             not the fetcher. AnalyzeRequest enforces the "required for
             github" rule at the API layer; the CLI has no --source
@@ -343,22 +343,31 @@ class Pipeline:
                 caching_provider = CachingAIProvider(counting_provider, cache)
                 active_provider = caching_provider
 
-            # Natural-language keyword extraction (GitHub only): a
-            # user's free-text description ("problems with invoice
+            # Natural-language query expansion (GitHub only): a user's
+            # free-text description ("problems with invoice
             # automation") isn't itself a usable Search Issues query -
-            # see src/insights/keyword_extraction.py. Uses the same
+            # see src/search/query_expander.py. QueryExpander replaced
+            # src.insights.keyword_extraction.extract_search_terms as
+            # this run's mechanism for deriving a search term (that
+            # module is left in place, unused on this path, not deleted
+            # - see TODO.md) specifically to avoid making two separate
+            # AI calls to derive one keyword. Only the first of
+            # QueryExpander's several related terms is used for now -
+            # GitHubFetcher does not yet accept more than one search
+            # term (a later task's job, see TODO.md). Uses the same
             # counted/cached active_provider as every other AI call
             # this run makes, so ai_calls_made/cache accounting stays
             # accurate and a repeated identical description is a cache
-            # hit, not a fresh billed call. Extracted exactly once and
+            # hit, not a fresh billed call. Expanded exactly once and
             # reused for both the initial fetch and any oversample
-            # round below - re-extracting per round would risk a
+            # round below - re-expanding per round would risk a
             # different (non-deterministic) query fragmenting what
             # should be one consistent search.
             search_keyword = self._config.keyword
             if self._config.source == "github" and self._config.keyword:
-                search_keyword = extract_search_terms(self._config.keyword, active_provider)
-                logger.info("Search terms extracted: %r (from %r)", search_keyword, self._config.keyword)
+                expanded_terms = QueryExpander(active_provider).expand(self._config.keyword)
+                search_keyword = expanded_terms[0]
+                logger.info("Query expanded from %r to: %s", self._config.keyword, expanded_terms)
 
             # GitHubFetcher ignores FetchQuery.community entirely (issue
             # search is keyword-driven - see github_fetcher.py); the
@@ -540,10 +549,10 @@ class Pipeline:
         CachingAIProvider (when enabled) makes re-extracting an
         already-seen post a cache hit rather than a real API call.
 
-        search_keyword is the already-extracted GitHub search query
-        (see run()'s own extract_search_terms call) - reused as-is
-        rather than re-extracted, so this round searches for the exact
-        same thing round 1 did, just with a bigger limit.
+        search_keyword is the already-expanded GitHub search term (see
+        run()'s own QueryExpander.expand() call) - reused as-is rather
+        than re-expanded, so this round searches for the exact same
+        thing round 1 did, just with a bigger limit.
         """
         logger.info(
             "Only %d/%d requested report(s) found from %d discussion(s); fetching more (up to the "

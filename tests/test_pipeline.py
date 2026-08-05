@@ -146,32 +146,45 @@ def test_pipeline_defaults_to_reddit_source_and_subreddit_as_community(tmp_path:
 # --- GitHub natural-language keyword extraction (src/insights/keyword_extraction.py) --
 
 
-def test_pipeline_extracts_search_terms_before_github_fetch(tmp_path: Path, monkeypatch):
-    """Adapted from the originally-requested 'discover_repos calls
-    extract_search_terms before the GitHub API' - discover_repos no
-    longer exists (GitHubFetcher searches directly now, see
-    github_fetcher.py's module docstring), and extraction happens in
-    Pipeline.run() rather than inside GitHubFetcher itself, so
-    GitHubFetcher stays AI-free (see PipelineConfig.keyword's and
-    keyword_extraction.py's docstrings for why). This is the real
-    equivalent: extract_search_terms runs before the fetch, and its
-    result - not the raw natural-language input - is what the fetcher
-    actually receives.
+class _StubQueryExpander:
+    """Stands in for src.search.query_expander.QueryExpander in tests
+    that only care about how Pipeline.run() wires it in, not its own
+    expansion logic (that's tests/search/test_query_expander.py's job).
+    Records every expand() call on the class itself, since Pipeline
+    constructs a fresh instance inline rather than reusing one.
+    """
+
+    calls: List[str] = []
+    return_value: List[str] = ["invoicing saas", "billing tool"]
+
+    def __init__(self, ai_provider) -> None:
+        self.ai_provider = ai_provider
+
+    def expand(self, user_input: str) -> List[str]:
+        type(self).calls.append(user_input)
+        return type(self).return_value
+
+
+def test_pipeline_expands_query_before_github_fetch(tmp_path: Path, monkeypatch):
+    """QueryExpander replaced extract_search_terms as the mechanism
+    that derives GitHub's search keyword (see PipelineConfig.keyword's
+    and src/search/query_expander.py's docstrings for why) - this
+    proves the real equivalent: expand() runs before the fetch, and
+    only the first of its returned terms - not the raw natural-language
+    input - is what the fetcher actually receives.
     """
     import src.pipeline.pipeline as pipeline_module
 
     captured: dict = {}
-
-    def _stub_extract(user_input, ai_provider):
-        captured["extract_called_with"] = user_input
-        return "invoicing automation"
+    _StubQueryExpander.calls = []
+    _StubQueryExpander.return_value = ["invoicing automation", "billing saas tool"]
 
     class _StubFetcher(Fetcher):
         def fetch(self, query: FetchQuery) -> List[FetchedPost]:
             captured["fetch_keyword"] = query.keyword
             return []
 
-    monkeypatch.setattr(pipeline_module, "extract_search_terms", _stub_extract)
+    monkeypatch.setattr(pipeline_module, "QueryExpander", _StubQueryExpander)
     monkeypatch.setattr(
         pipeline_module, "get_fetcher", lambda config, *, source="reddit", force_mock=False: _StubFetcher()
     )
@@ -186,29 +199,27 @@ def test_pipeline_extracts_search_terms_before_github_fetch(tmp_path: Path, monk
     )
     Pipeline(config).run()
 
-    assert captured["extract_called_with"] == "problems with invoice automation"
-    assert captured["fetch_keyword"] == "invoicing automation"  # extracted value, not raw input
+    assert _StubQueryExpander.calls == ["problems with invoice automation"]
+    assert captured["fetch_keyword"] == "invoicing automation"  # first expanded term, not the raw input
 
 
-def test_pipeline_does_not_extract_search_terms_for_reddit_source(tmp_path: Path, monkeypatch):
-    """extract_search_terms is GitHub-only (see PipelineConfig.keyword's
+def test_pipeline_does_not_expand_query_for_reddit_source(tmp_path: Path, monkeypatch):
+    """QueryExpander is GitHub-only (see PipelineConfig.keyword's
     docstring) - a Reddit run's keyword must reach the fetcher
     completely unchanged, with no AI call in between.
     """
     import src.pipeline.pipeline as pipeline_module
 
     captured: dict = {}
-
-    def _stub_extract(user_input, ai_provider):
-        captured["extract_called"] = True
-        return "should never be used"
+    _StubQueryExpander.calls = []
+    _StubQueryExpander.return_value = ["should never be used"]
 
     class _StubFetcher(Fetcher):
         def fetch(self, query: FetchQuery) -> List[FetchedPost]:
             captured["fetch_keyword"] = query.keyword
             return []
 
-    monkeypatch.setattr(pipeline_module, "extract_search_terms", _stub_extract)
+    monkeypatch.setattr(pipeline_module, "QueryExpander", _StubQueryExpander)
     monkeypatch.setattr(
         pipeline_module, "get_fetcher", lambda config, *, source="reddit", force_mock=False: _StubFetcher()
     )
@@ -224,7 +235,7 @@ def test_pipeline_does_not_extract_search_terms_for_reddit_source(tmp_path: Path
     )
     Pipeline(config).run()
 
-    assert "extract_called" not in captured
+    assert _StubQueryExpander.calls == []
     assert captured["fetch_keyword"] == "invoice automation problems"
 
 
