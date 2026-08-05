@@ -120,14 +120,15 @@ class GitHubFetcher(BaseFetcher):
         if not query.keyword:
             raise FetcherError("A keyword is required to search GitHub issues.")
 
-        # Only ever a single-element list today - FetchQuery carries one
-        # str keyword (src/models.py, unchanged by this task) and
-        # Pipeline.run() only forwards QueryExpander's first expanded
-        # term (src/pipeline/pipeline.py). _discover_issues accepts a
-        # List[str] anyway so a future task can pass the remaining
-        # expanded terms through without this method's signature
-        # changing again.
-        issues = self._discover_issues([query.keyword], query.keyword, query.limit)
+        # query.keywords (src/models.py) carries every term
+        # QueryExpander produced, when the caller set it - Pipeline.run()
+        # does, for a "source=github" run (see PipelineConfig.keyword's
+        # docstring). Falls back to the single query.keyword for any
+        # caller that only ever set that (every existing test, and any
+        # future caller of the generic Fetcher interface that has no
+        # concept of multiple related terms).
+        search_terms = query.keywords if query.keywords else [query.keyword]
+        issues = self._discover_issues(search_terms, query.keyword, query.limit)
 
         return self.fetch_parallel(issues, self._issue_to_post)
 
@@ -140,6 +141,7 @@ class GitHubFetcher(BaseFetcher):
         relevant issues are never dropped just for low engagement).
         """
         all_issues: Dict[str, Dict[str, Any]] = {}
+        per_term_counts: Dict[str, int] = {}
 
         for term in search_terms:
             try:
@@ -154,6 +156,8 @@ class GitHubFetcher(BaseFetcher):
                 logger.warning(f"Search failed for '{term}': {exc}")
                 continue
 
+            per_term_counts[term] = len(issues)
+
             for issue in issues:
                 repo = _repo_from_repository_url(issue.get("repository_url") or "")
                 number = issue.get("number")
@@ -164,7 +168,21 @@ class GitHubFetcher(BaseFetcher):
         if not all_issues:
             raise FetcherError(f"No open GitHub issues found matching '{original_keyword}'.")
 
+        excluded_count = sum(
+            1 for issue in all_issues.values() if self.ranker.score_github_issue(issue, original_keyword) < 0
+        )
+
         ranked = self.ranker.rank_github_issues(list(all_issues.values()), original_keyword, top_n=limit)
+        logger.info(
+            "GitHub multi-term search: %d term(s) %s -> %d issue(s) fetched, %d unique after dedup, "
+            "%d excluded as tutorial/intern/practice, %d returned",
+            len(search_terms),
+            per_term_counts,
+            sum(per_term_counts.values()),
+            len(all_issues),
+            excluded_count,
+            len(ranked),
+        )
         if not ranked:
             raise FetcherError(
                 f"Found GitHub issues matching '{original_keyword}', but all appeared to be "

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 @dataclass(frozen=True)
@@ -62,10 +62,20 @@ class FetchQuery:
             is a subreddit name. Future sources may interpret it
             differently (e.g. a repo name for GitHub) or ignore it
             (e.g. mock data).
-        keyword: Optional keyword filter.
+        keyword: Optional keyword filter. The single, primary term -
+            always set alongside keywords when there are several (e.g.
+            keywords[0]), so any fetcher that only understands keyword
+            still behaves exactly as before.
+        keywords: Optional list of related search terms (e.g. from
+            src.search.query_expander.QueryExpander), for a fetcher
+            that can search each one separately and merge the results -
+            currently only GitHubFetcher does. None/empty means "use
+            keyword alone" - every existing call site that never sets
+            this keeps working unchanged.
         limit: Maximum number of posts to return.
     """
 
     community: str
     keyword: Optional[str] = None
+    keywords: Optional[List[str]] = None
     limit: int = 25

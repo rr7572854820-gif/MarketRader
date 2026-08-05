@@ -138,12 +138,14 @@ class PipelineConfig:
             src.search.query_expander.QueryExpander (using this run's
             own AI provider) to turn free-text, natural-language input
             (e.g. "problems with invoice automation") into several
-            related short technical search terms, of which only the
-            first is currently used ("invoicing saas") before it ever
-            reaches GitHubFetcher, which still receives only a plain
-            keyword string and has no idea this happened - see that module's
-            docstring for why extraction lives in the pipeline layer,
-            not the fetcher. AnalyzeRequest enforces the "required for
+            related short technical search terms (e.g. "invoicing
+            saas", "billing automation tool"). All of them reach
+            GitHubFetcher via FetchQuery.keywords (src/models.py) -
+            it searches each one separately and merges/ranks the
+            combined results (see github_fetcher.py's _discover_issues)
+            - while FetchQuery.keyword still carries just the first
+            term, for any other fetcher that only understands a single
+            keyword. AnalyzeRequest enforces the "required for
             github" rule at the API layer; the CLI has no --source
             flag yet (see ENGINEERING_GUIDE.md's known limitations).
         post_limit: Max posts to fetch. Remains the hard ceiling on
@@ -348,22 +350,27 @@ class Pipeline:
             # automation") isn't itself a usable Search Issues query -
             # see src/search/query_expander.py. QueryExpander replaced
             # src.insights.keyword_extraction.extract_search_terms as
-            # this run's mechanism for deriving a search term (that
+            # this run's mechanism for deriving search terms (that
             # module is left in place, unused on this path, not deleted
             # - see TODO.md) specifically to avoid making two separate
-            # AI calls to derive one keyword. Only the first of
-            # QueryExpander's several related terms is used for now -
-            # GitHubFetcher does not yet accept more than one search
-            # term (a later task's job, see TODO.md). Uses the same
-            # counted/cached active_provider as every other AI call
-            # this run makes, so ai_calls_made/cache accounting stays
-            # accurate and a repeated identical description is a cache
-            # hit, not a fresh billed call. Expanded exactly once and
-            # reused for both the initial fetch and any oversample
-            # round below - re-expanding per round would risk a
-            # different (non-deterministic) query fragmenting what
-            # should be one consistent search.
+            # AI calls. All of QueryExpander's related terms are passed
+            # to GitHubFetcher via FetchQuery.keywords (src/models.py) -
+            # it searches each one separately and merges/ranks the
+            # combined results (src/fetchers/github_fetcher.py's
+            # _discover_issues); search_keyword (expanded_terms[0])
+            # still goes in FetchQuery.keyword too, both as the primary
+            # term for ranking/error messages and so any other fetcher
+            # that only understands a single keyword is unaffected.
+            # Uses the same counted/cached active_provider as every
+            # other AI call this run makes, so ai_calls_made/cache
+            # accounting stays accurate and a repeated identical
+            # description is a cache hit, not a fresh billed call.
+            # Expanded exactly once and reused for both the initial
+            # fetch and any oversample round below - re-expanding per
+            # round would risk a different (non-deterministic) query
+            # fragmenting what should be one consistent search.
             search_keyword = self._config.keyword
+            expanded_terms: Optional[List[str]] = None
             if self._config.source == "github" and self._config.keyword:
                 expanded_terms = QueryExpander(active_provider).expand(self._config.keyword)
                 search_keyword = expanded_terms[0]
@@ -388,7 +395,7 @@ class Pipeline:
                         self._config.num_reports,
                         _FETCH_LIMIT_HARD_CAP,
                     )
-            query = FetchQuery(community=community, keyword=search_keyword, limit=initial_limit)
+            query = FetchQuery(community=community, keyword=search_keyword, keywords=expanded_terms, limit=initial_limit)
 
             if self._config.source == "github":
                 self._emit(on_progress, "fetch", f"🔍 Searching GitHub for '{search_keyword}'...", 5)
@@ -416,7 +423,7 @@ class Pipeline:
                 # No on_progress here - see run()'s own docstring on why
                 # only the main pass reports progress.
                 posts, insights, clusters = self._oversample_for_report_count(
-                    fetcher, community, search_keyword, posts, len(clusters), active_provider, errors
+                    fetcher, community, search_keyword, expanded_terms, posts, len(clusters), active_provider, errors
                 )
 
             verification_report = self._verify(insights, posts, on_progress)
@@ -535,6 +542,7 @@ class Pipeline:
         fetcher: Fetcher,
         community: str,
         search_keyword: Optional[str],
+        expanded_terms: Optional[List[str]],
         posts: List[FetchedPost],
         clusters_so_far: int,
         active_provider: AIProvider,
@@ -549,10 +557,11 @@ class Pipeline:
         CachingAIProvider (when enabled) makes re-extracting an
         already-seen post a cache hit rather than a real API call.
 
-        search_keyword is the already-expanded GitHub search term (see
-        run()'s own QueryExpander.expand() call) - reused as-is rather
-        than re-expanded, so this round searches for the exact same
-        thing round 1 did, just with a bigger limit.
+        search_keyword/expanded_terms are the already-expanded GitHub
+        search term(s) (see run()'s own QueryExpander.expand() call) -
+        reused as-is rather than re-expanded, so this round searches
+        for the exact same thing(s) round 1 did, just with a bigger
+        limit.
         """
         logger.info(
             "Only %d/%d requested report(s) found from %d discussion(s); fetching more (up to the "
@@ -562,7 +571,9 @@ class Pipeline:
             len(posts),
             self._config.post_limit,
         )
-        query = FetchQuery(community=community, keyword=search_keyword, limit=self._config.post_limit)
+        query = FetchQuery(
+            community=community, keyword=search_keyword, keywords=expanded_terms, limit=self._config.post_limit
+        )
         more_posts = self._fetch(fetcher, query, errors)
         merged_posts = _merge_posts(posts, more_posts)
         insights = self._analyze(merged_posts, active_provider, errors)

@@ -47,6 +47,41 @@ Ideas worth considering later, explicitly not committed to now.
 
 ## Session Log
 
+## Session — 2026-08-05 (Fix multi-term search: all expanded terms now reach GitHubFetcher)
+
+### Current Objective
+Verify and fix a specific, named regression from the prior two tasks: `GitHubFetcher._discover_issues()` was built to accept multiple search terms and merge/rank across them, but `Pipeline.run()` only ever passed it a single-element list (`expanded_terms[0]`) - confirm this live with diagnostic logging, then fix the connection so all of `QueryExpander`'s terms actually reach the fetcher.
+
+### Completed Work
+- Diagnosed first, as required, before changing anything: temporary `[DIAGNOSTIC]` logging added to `_discover_issues()`, then ran the real `Pipeline.run()` (not just `GitHubFetcher.fetch()` in isolation) with `keyword="invoicing"`, `limit=8` against the real Groq + GitHub APIs. Confirmed the exact bottleneck: `QueryExpander` genuinely produced 4 related terms, but only 1 reached the fetcher (`pipeline.py`'s `search_keyword = expanded_terms[0]`), yielding just 8 total issues fetched, 4 after quality filtering, 4 final reports - matching the task's own predicted failure mode exactly.
+- **Found and flagged a real, boundary-crossing constraint before writing the fix**: `_discover_issues(search_terms: List[str], ...)` already existed and was ready to receive multiple terms (built in the relevance-ranking task), but the *only* channel from `pipeline.py` to `GitHubFetcher.fetch()` is `FetchQuery.keyword` - a single `Optional[str]` field in `src/models.py`, outside this task's stated boundary (`github_fetcher.py` + `pipeline.py` only). Confirmed via `AskUserQuestion` before proceeding, rather than either quietly encoding multiple terms into the single string field (a delimiter hack considered and rejected) or quietly leaving the bug unfixed: extend `FetchQuery` with a new, backward-compatible `keywords: Optional[List[str]] = None` field, with explicit sign-off to cross the stated boundary since the alternative (a delimiter-encoded string, independently duplicated in two files because `pipeline.py` is separately barred from importing `github_fetcher.py` directly) was clearly worse.
+- `src/models.py`: `FetchQuery` gained `keywords: Optional[List[str]] = None`, right after `keyword`, with an updated docstring explaining the relationship (`keyword` stays the single primary term for every existing/other fetcher; `keywords`, when set, is the full related-term list a fetcher *can* use). Every existing `FetchQuery(...)` call site across the whole test suite keeps working unchanged (confirmed by the full suite still passing) since the new field defaults to `None`.
+- `src/pipeline/pipeline.py`: `run()` now keeps the full `expanded_terms` list (not just `expanded_terms[0]`) and passes it as `FetchQuery(..., keywords=expanded_terms)` for the initial fetch; `_oversample_for_report_count` gained an `expanded_terms` parameter and does the same for its own (re-used, not re-expanded) fetch round, consistent with its existing "search for the exact same thing round 1 did" contract. `PipelineConfig.keyword`'s docstring updated (no longer says "only the first is currently used").
+- `src/fetchers/github_fetcher.py`: `fetch()` now does `search_terms = query.keywords if query.keywords else [query.keyword]` before calling `_discover_issues` - uses every term when the caller provided them, falls back to the single `query.keyword` otherwise (every existing test, and any future caller of the generic `Fetcher` interface with no concept of multiple terms).
+- Temporary `[DIAGNOSTIC]`-tagged logging removed after use (as the task itself framed it - "temporary"), replaced with one clean, permanent, properly-labeled `logger.info` line in `_discover_issues` summarizing term count, per-term counts, total fetched, unique-after-dedup, excluded-count, and final count - consistent with this codebase's existing single-informative-line-per-stage logging style (the `⏱` timing lines, `rank_github_issues`'s own existing "Ranked X issue(s) -> kept Y" line).
+- **Re-verified live after the fix, twice, against the real Groq + GitHub APIs, same `keyword="invoicing"`, `limit=8`**: both runs showed 4 search terms reaching the fetcher, 8 issues fetched per term, 32 total before quality filtering, 25-27 after (real, live-measured - the task's suggested 15-20 range was a rough estimate, not tuned to hit exactly; not artificially forced to match, since doing so would mean fitting the result to an expected number rather than reporting what's actually true), 8 final reports. All other requested numbers (terms used, issues/term, total before filter, final reports) landed exactly within the task's expected ranges.
+- Full suite: 251 passed both before and after the fix (excluding the 2 pre-existing, unrelated `test_extractor.py` failures named in earlier entries) - the `FetchQuery` extension, despite touching a shared model every fetcher depends on, caused zero regressions anywhere in the suite.
+
+### Known Issues / Named Limitations
+- The "total issues after quality filter" count (25-27 in live testing) ran somewhat above the task's suggested 15-20 estimate - real, live GitHub search results for the specific terms `QueryExpander` happened to generate on those runs, not a bug; different real search terms will naturally produce a different real count.
+- `FetchQuery.keywords` is GitHub-specific in practice today - no other fetcher (`RedditFetcher`, `MockFetcher`) reads it, and `Pipeline.run()` only ever sets it for `source="github"`. The field itself is source-agnostic by design (any future fetcher could opt in), but nothing exercises that yet.
+
+### Important Decisions
+- Confirmed via `AskUserQuestion` before writing the fix: extend `FetchQuery` (crossing this task's stated file boundary, with explicit authorization) rather than encode multiple terms into the existing single `keyword` string via a delimiter - the delimiter approach would have stayed inside the literal boundary but required duplicating a coupling constant across two files (since `pipeline.py` is separately, permanently barred from importing anything from `github_fetcher.py` directly - a harder, pre-existing rule than this task's own boundary) and would have silently repurposed a documented field's contract without `models.py` itself reflecting that.
+- Did not tune `RelevanceRanker`'s scoring thresholds to force the "after filter" count into the task's suggested 15-20 range - reported the real, live-measured 25-27 instead, consistent with this project's evidence-integrity standard applying to Claude's own verification numbers, not just MarketRadar's product output.
+
+### Next Tasks
+- None specifically raised by this task.
+
+### Questions
+None new.
+
+### Lessons Learned
+- A capability built in one task (`_discover_issues` accepting `List[str]`) being unreachable from the caller in practice is a distinct, separately-diagnosable bug from "the capability doesn't exist" - the diagnostic-logging-first requirement this task specified was what turned "probably not wired up" into an exact, measured, four-number confirmation before any fix was written.
+- A task's suggested verification numbers are estimates, not requirements to be reverse-engineered into - hitting 4/4 close-but-not-exact live numbers and reporting the one that didn't land in-range honestly is more valuable than quietly adjusting scoring logic until the numbers matched.
+
+---
+
 ## Session — 2026-08-05 (Relevance ranking for GitHub search: RelevanceRanker)
 
 ### Current Objective
