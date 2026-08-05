@@ -47,6 +47,36 @@ Ideas worth considering later, explicitly not committed to now.
 
 ## Session Log
 
+## Session — 2026-08-01 (Migrate GitHubFetcher onto BaseFetcher)
+
+### Current Objective
+Migrate `GitHubFetcher` onto the `BaseFetcher` added last task — actually use `fetch_parallel()` and `truncate_content()`, not just make them available.
+
+### Completed Work
+- Verified premises before writing anything (per the task's own instruction, again): `BaseFetcher` confirmed to exist (`base.py:58`); `GitHubFetcher.fetch()` confirmed to have **no per-repo loop and no `_fetch_single_repo`-shaped method** — the task's Steps 2-3 (extract a per-repo method, parallelize over repos) describe the pre-rewrite architecture that was removed several tasks ago in this same session (Search Issues API replaced repo-discovery entirely). Adapted honestly rather than inventing a fake repo-level abstraction: `_issue_to_post` (the existing per-issue method, which already makes the one sequential HTTP call worth parallelizing - the comments fetch) is used directly as `fetch_parallel()`'s callback; the real per-item unit here is one issue, not one repo. `src/fetchers/hn_fetcher.py` confirmed not to exist - that section skipped entirely.
+- `GitHubFetcher(Fetcher)` → `GitHubFetcher(BaseFetcher)`. `fetch()`'s `[self._issue_to_post(issue) for issue in issues]` → `self.fetch_parallel(issues, self._issue_to_post)`. `_issue_to_post()` now truncates its combined body+comments text via `self.truncate_content(text)` before returning (previously unbounded).
+- 4 new tests appended to `tests/fetchers/test_github_fetcher.py` (adapted to the issue-level reality: `test_github_inherits_base_fetcher`, `test_github_uses_fetch_parallel` (spies on `fetch_parallel` itself to prove `fetch()` actually routes through it, not a disguised loop), `test_github_truncates_content`, `test_github_failed_issue_continues`). All 12 pre-existing tests in that file still pass unchanged - confirmed the existing `_MockGitHubAPI` mock (a plain list `.calls.append(...)`) stays correct under real `ThreadPoolExecutor` threads, since CPython's GIL makes single `list.append()` calls atomic, and `unittest.mock.patch()` replaces the module attribute process-wide, not thread-locally. Full suite 227 → **231**.
+- Fixed the given live-verification script before running it — it had three real bugs, not just a naming quirk: `GitHubFetcher(keyword=..., limit=...)` doesn't match the actual constructor (`GitHubFetcher(config: Config)`); `fetcher.fetch()` needs a `FetchQuery` argument; `isinstance(fetcher, BaseFetcher.__class__)` checks the *metaclass* (effectively always false for a normal instance), not `isinstance(fetcher, BaseFetcher)`. Ran the corrected version against the real GitHub API: 5 issues fetched in 2.4s, `isinstance(fetcher, BaseFetcher)` → `True`.
+
+### Known Issues / Named Limitations
+- No rigorous before/after benchmark exists for the parallelization's actual speedup (the pre-parallel code no longer exists to compare against) - the 2.4s/5-issues live run is a single qualitative data point, not a measured improvement.
+- `RedditFetcher`/`MockFetcher` still don't inherit `BaseFetcher` - out of this task's explicit scope, not evaluated for whether migrating them would help (Reddit fetching via PRAW may not benefit the same way; not investigated).
+- `BaseFetcher.FETCH_TIMEOUT` still has no call site (same gap noted last task) - `GitHubFetcher`'s own `_TIMEOUT_SECONDS` constant is untouched and still what's actually used.
+
+### Important Decisions
+- Did not invent a `_fetch_single_repo` method just to satisfy the task's literal wording — that would have reintroduced a repo-level abstraction this codebase deliberately removed, for no functional benefit, purely to pattern-match pseudocode written against stale architecture. Used the real, existing per-item extraction point instead and said so plainly.
+
+### Next Tasks
+- None specifically raised by this task; `RedditFetcher` migration onto `BaseFetcher` remains unexplored if parallel/truncation benefits are ever wanted there too.
+
+### Questions
+None new.
+
+### Lessons Learned
+- The same category of drift keeps recurring across this session's tasks: pseudocode written against an earlier version of this codebase's architecture (repo-discovery-based GitHub fetching) rather than its current state. Reading the actual current file before writing code — not just trusting a task's own description of it — has caught this every time it's come up; it would have been a real, silent bug (or a confusing dead-end) to implement literally.
+
+---
+
 ## Session — 2026-08-01 (BaseFetcher: parallel fetch + content truncation helpers)
 
 ### Current Objective

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Loader2, PlayCircle } from "lucide-react";
 import { toast } from "sonner";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -15,7 +16,7 @@ import { ErrorState } from "@/components/error-state";
 import { AnalysisResultSkeleton } from "@/components/skeletons/analysis-result-skeleton";
 import { AnalysisProgress } from "@/components/analysis-progress";
 import { api } from "@/lib/api/client";
-import type { AnalyzeRequest, AnalyzeResponse, Source } from "@/lib/api/types";
+import type { AnalyzeRequest, AnalyzeResponse, ExecutionSummary, Source } from "@/lib/api/types";
 import { getDefaultMockMode } from "@/lib/settings";
 import { cacheFreshReport } from "@/lib/report-cache";
 import { useClientValue } from "@/hooks/use-client-value";
@@ -324,13 +325,41 @@ export function AnalysisForm() {
 
       {!isSubmitting && error ? <ErrorState error={error} onRetry={() => setError(null)} /> : null}
 
-      {!isSubmitting && result ? <AnalysisResultSummary result={result} /> : null}
+      {!isSubmitting && result ? (
+        <AnalysisResultSummary
+          result={result}
+          onTrySuggestion={(suggestion) => {
+            setKeyword(suggestion);
+            setResult(null);
+          }}
+        />
+      ) : null}
     </div>
   );
 }
 
-function AnalysisResultSummary({ result }: { result: AnalyzeResponse }) {
+const TOPIC_SUGGESTIONS = ["invoicing", "payments", "authentication"];
+
+/** Evidence-integrity note (see CLAUDE.md §5, "never silently drop
+ * uncertainty"): this summary never hides *that* some discussions
+ * failed to analyze - it only avoids leading with a raw, technical,
+ * URL-filled error list. The real success ratio is always shown in
+ * plain language, and the underlying backend error strings stay one
+ * click away via the "Show details" disclosure below, never deleted.
+ * A shortfall is never relabeled as an intentional "quality filter" -
+ * nothing was filtered; some extractions genuinely failed, and saying
+ * so plainly is what lets a founder judge how much to trust the result.
+ */
+function AnalysisResultSummary({
+  result,
+  onTrySuggestion,
+}: {
+  result: AnalyzeResponse;
+  onTrySuggestion: (keyword: string) => void;
+}) {
   const { summary, report_id } = result;
+  const hasShortfall = summary.posts_analyzed < summary.posts_fetched;
+  const foundNothing = summary.clusters_found === 0;
 
   return (
     <Card>
@@ -346,12 +375,26 @@ function AnalysisResultSummary({ result }: { result: AnalyzeResponse }) {
       </CardHeader>
       <CardContent className="space-y-4">
         {summary.errors.length > 0 ? (
-          <ul className="list-inside list-disc space-y-1 text-sm text-destructive">
-            {summary.errors.map((message, i) => (
-              <li key={i}>{message}</li>
-            ))}
-          </ul>
+          <div className="space-y-1.5">
+            <p className="text-sm text-muted-foreground">
+              {hasShortfall
+                ? `${summary.posts_analyzed} of ${summary.posts_fetched} fetched discussions could be analyzed.`
+                : `${summary.errors.length} note${summary.errors.length === 1 ? "" : "s"} from this run.`}
+            </p>
+            <details className="group">
+              <summary className="cursor-pointer text-xs text-muted-foreground underline-offset-2 hover:underline">
+                Show details
+              </summary>
+              <ul className="mt-2 list-inside list-disc space-y-1 font-mono text-xs text-muted-foreground">
+                {summary.errors.map((message, i) => (
+                  <li key={i}>{message}</li>
+                ))}
+              </ul>
+            </details>
+          </div>
         ) : null}
+
+        {foundNothing ? <EmptyResultState summary={summary} onTrySuggestion={onTrySuggestion} /> : null}
 
         {report_id ? (
           <Button render={<Link href={`/reports/${report_id}`} />} nativeButton={false}>View full report</Button>
@@ -362,5 +405,45 @@ function AnalysisResultSummary({ result }: { result: AnalyzeResponse }) {
         )}
       </CardContent>
     </Card>
+  );
+}
+
+/** Deliberately two different messages, not one generic "no results" -
+ * conflating "genuinely nothing matched this topic" with "discussions
+ * were found but analysis couldn't complete" would give wrong advice
+ * in the second case (steering toward a different keyword when the
+ * real cause might be, say, a temporarily unavailable AI provider -
+ * see the "Show details" disclosure above for what actually happened).
+ */
+function EmptyResultState({
+  summary,
+  onTrySuggestion,
+}: {
+  summary: ExecutionSummary;
+  onTrySuggestion: (keyword: string) => void;
+}) {
+  const nothingFetched = summary.posts_fetched === 0;
+
+  return (
+    <div className="space-y-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-3">
+      <p className="text-sm text-foreground">
+        {nothingFetched
+          ? "No discussions found for this topic."
+          : `Found ${summary.posts_fetched} discussion(s), but none could be turned into a verified opportunity - this may be a temporary issue rather than a sign there's nothing here (see details above).`}
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-muted-foreground">Try:</span>
+        {TOPIC_SUGGESTIONS.map((topic) => (
+          <Badge
+            key={topic}
+            variant="outline"
+            render={<button type="button" onClick={() => onTrySuggestion(topic)} />}
+            className="cursor-pointer hover:bg-muted"
+          >
+            {topic}
+          </Badge>
+        ))}
+      </div>
+    </div>
   );
 }

@@ -21,7 +21,7 @@ from unittest.mock import patch
 import pytest
 
 from src.config import Config
-from src.fetchers.base import FetcherError
+from src.fetchers.base import BaseFetcher, FetcherError
 from src.fetchers.exceptions import FetcherRateLimitError
 from src.fetchers.github_fetcher import GitHubFetcher
 from src.models import FetchQuery
@@ -296,3 +296,74 @@ def test_comments_are_folded_into_post_text():
 
     assert "first comment" in posts[0].text
     assert "second comment" in posts[0].text
+
+
+# --- BaseFetcher migration ---------------------------------------------------------
+
+
+def test_github_inherits_base_fetcher():
+    assert isinstance(GitHubFetcher(_config()), BaseFetcher)
+
+
+def test_github_uses_fetch_parallel(monkeypatch):
+    """fetch() must route each issue through BaseFetcher.fetch_parallel()
+    (not a plain sequential loop) - there is no per-repo iteration left
+    to parallelize since the Search Issues API rewrite (see module
+    docstring), so the per-item unit is one issue, via the existing
+    _issue_to_post - proven here by spying on fetch_parallel itself.
+    """
+    fetcher = GitHubFetcher(_config())
+    fake_issues = [{"number": i} for i in range(3)]
+    monkeypatch.setattr(fetcher, "_search_issues", lambda keyword, limit: fake_issues)
+
+    captured: dict = {}
+    real_fetch_parallel = fetcher.fetch_parallel
+
+    def spy_fetch_parallel(items, fetch_fn, max_workers=None):
+        captured["items"] = items
+        captured["fetch_fn"] = fetch_fn
+        return real_fetch_parallel(items, fetch_fn, max_workers)
+
+    monkeypatch.setattr(fetcher, "fetch_parallel", spy_fetch_parallel)
+    monkeypatch.setattr(fetcher, "_issue_to_post", lambda issue: f"post-{issue['number']}")
+
+    results = fetcher.fetch(FetchQuery(community="ignored", keyword="invoicing", limit=10))
+
+    assert captured["items"] == fake_issues
+    assert captured["fetch_fn"] == fetcher._issue_to_post
+    assert sorted(results) == ["post-0", "post-1", "post-2"]
+
+
+def test_github_truncates_content():
+    long_body = "x" * 3000
+    api = _MockGitHubAPI()
+    api.search_pages = [_FakeResponse(200, {"items": [_issue(number=1, repo="owner/repo", body=long_body)]})]
+
+    with _patch_requests(api):
+        posts = GitHubFetcher(_config()).fetch(FetchQuery(community="ignored", keyword="invoicing", limit=1))
+
+    assert len(posts[0].text) <= 1600
+    assert "[Content truncated for analysis]" in posts[0].text
+
+
+def test_github_failed_issue_continues(monkeypatch):
+    """One issue's per-item fetch failing (e.g. its comments call
+    errors) must not lose the other, genuinely-fetched issues, and must
+    not raise - fetch_parallel's own per-item isolation (already unit-
+    tested in test_base_fetcher.py) proven here through the real
+    GitHubFetcher.fetch() integration, not in isolation.
+    """
+    fetcher = GitHubFetcher(_config())
+    fake_issues = [{"number": 1}, {"number": 2}, {"number": 3}]
+    monkeypatch.setattr(fetcher, "_search_issues", lambda keyword, limit: fake_issues)
+
+    def flaky_issue_to_post(issue):
+        if issue["number"] == 1:
+            raise FetcherError("simulated per-issue failure")
+        return f"post-{issue['number']}"
+
+    monkeypatch.setattr(fetcher, "_issue_to_post", flaky_issue_to_post)
+
+    results = fetcher.fetch(FetchQuery(community="ignored", keyword="invoicing", limit=10))  # must not raise
+
+    assert sorted(results) == ["post-2", "post-3"]

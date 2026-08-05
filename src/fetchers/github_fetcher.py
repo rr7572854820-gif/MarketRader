@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from src.config import Config
-from src.fetchers.base import Fetcher, FetcherError
+from src.fetchers.base import BaseFetcher, FetcherError
 from src.fetchers.exceptions import (
     FetcherAuthError,
     FetcherNotFoundError,
@@ -57,7 +57,7 @@ _DEFAULT_RATE_LIMIT_MESSAGE = "GitHub rate limit exceeded. Add GITHUB_TOKEN to .
 _DEFAULT_INVALID_MESSAGE = "GitHub API rejected the request as malformed."
 
 
-class GitHubFetcher(Fetcher):
+class GitHubFetcher(BaseFetcher):
     """Searches public GitHub issues directly for query.keyword via the
     Search Issues API, then fetches each match's comments.
 
@@ -71,6 +71,22 @@ class GitHubFetcher(Fetcher):
     comments are appended into that same post's text rather than
     becoming their own FetchedPost items - unchanged from the previous
     design, see TODO.md.
+
+    Inherits BaseFetcher (src/fetchers/base.py) for two things:
+    - fetch() fans the per-issue work (each issue needs its own GET for
+      comments - see _issue_to_post) out across a thread pool via
+      fetch_parallel(), instead of the N sequential round trips this
+      used to make. There is no per-repo loop to parallelize here (the
+      Search Issues API rewrite - see this module's own docstring -
+      already collapsed repo-by-repo fetching into one search call), so
+      the per-item unit fetch_parallel() fans out over is one issue,
+      not one repo; _issue_to_post already did exactly the one HTTP
+      call worth parallelizing, so it's reused as-is rather than a new
+      method being introduced.
+    - _issue_to_post() truncates its combined body+comments text via
+      truncate_content() before returning it - unbounded before this,
+      since a heavily-discussed issue's comment thread has no natural
+      size limit.
     """
 
     def __init__(self, config: Config) -> None:
@@ -78,7 +94,7 @@ class GitHubFetcher(Fetcher):
 
     def fetch(self, query: FetchQuery) -> List[FetchedPost]:
         """Search GitHub issues for query.keyword and fetch each match's
-        comments.
+        comments (in parallel - see class docstring).
 
         Raises:
             FetcherError: If query.keyword is missing/blank, if the
@@ -93,7 +109,7 @@ class GitHubFetcher(Fetcher):
         if not issues:
             raise FetcherError(f"No open GitHub issues found matching '{query.keyword}'.")
 
-        return [self._issue_to_post(issue) for issue in issues]
+        return self.fetch_parallel(issues, self._issue_to_post)
 
     def _search_issues(self, keyword: str, limit: int) -> List[Dict[str, Any]]:
         """Fetches up to `limit` open issues matching keyword, paging
@@ -184,6 +200,7 @@ class GitHubFetcher(Fetcher):
         text = issue.get("body") or ""
         if comments:
             text = f"{text}\n\n--- Comments ---\n" + "\n".join(comments)
+        text = self.truncate_content(text)
 
         reactions = issue.get("reactions") or {}
         score = int(reactions.get("+1") or 0) + int(reactions.get("heart") or 0)
