@@ -19,7 +19,7 @@ export type ConfidenceLevel = "Strong" | "Moderate" | "Weak";
 
 export type ReportFormat = "terminal" | "markdown" | "both";
 
-export type Source = "reddit" | "github";
+export type Source = "reddit" | "github" | "hackernews" | "hn";
 
 export interface AnalyzeRequest {
   keyword?: string | null;

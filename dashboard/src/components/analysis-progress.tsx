@@ -64,10 +64,6 @@ interface ProgressMessage {
 
 export interface AnalysisProgressProps {
   keyword: string;
-  /** "hackernews" is not a real source anywhere in this codebase (no
-   * fetcher, no backend support) - only the two the API actually
-   * accepts are included here; passing anything else would just 422.
-   */
   source: Source;
   limit: number;
   useCache: boolean;

@@ -79,6 +79,7 @@ pip install -r requirements.txt
 - **Gemini (required for real analysis):** free tier available — create a key at https://aistudio.google.com/apikey and set `GEMINI_API_KEY`.
 - **Reddit (optional):** leave blank to use built-in mock sample data instead of real Reddit posts. To use real data, create a script app at https://www.reddit.com/prefs/apps and set `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` / `REDDIT_USER_AGENT`.
 - **GitHub (optional):** `GitHubFetcher` (`src/fetchers/github_fetcher.py`) discovers up to 5 relevant public repos for a topic keyword (via GitHub's Search API, filtering out archived/forked/issue-less repos), then fetches open issues + comments from each — no token required (60 req/hour, unauthenticated). Set `GITHUB_TOKEN` (a personal access token from https://github.com/settings/tokens) to raise that to 5000 req/hour. Reachable via `POST /analyze`/`/analyze/mock` (`{"source": "github", "keyword": "invoicing", ...}` — no repo name needed) and the dashboard's Source toggle. **Not yet wired into the CLI** (`src/pipeline/runner.py` has no `--source` flag) — added as a second data source ahead of TODO.md's original "prove Reddit end-to-end first" sequencing (see TODO.md and SESSION.md for that decision).
+- **Hacker News (no setup required):** `HNFetcher` (`src/fetchers/hn_fetcher.py`) searches Hacker News stories for a topic keyword via the public, unauthenticated Algolia HN Search API (`hn.algolia.com`) — no account, token, or `.env` entry of any kind. Filters out low-point (<5), hiring-thread, and poll posts before returning results. Reachable via `POST /analyze`/`/analyze/mock` (`{"source": "hackernews", "keyword": "invoicing", ...}` — alias `"hn"` also accepted) and the dashboard's Source toggle. Same CLI limitation as GitHub above: no `--source` flag yet.
 
 **3. Verify your setup:**
 
@@ -161,6 +162,14 @@ curl -X POST http://127.0.0.1:8000/analyze \
 curl -X POST http://127.0.0.1:8000/analyze \
   -H "Content-Type: application/json" \
   -d '{"source": "github", "keyword": "invoicing", "limit": 10}'
+```
+
+**Example: a real run against Hacker News, by topic keyword** (no account/token needed — `HNFetcher` searches the public Algolia HN Search API; no mock equivalent, so this always hits the real API):
+
+```
+curl -X POST http://127.0.0.1:8000/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"source": "hackernews", "keyword": "invoicing", "limit": 10}'
 ```
 
 **Example: retrieving a past report**

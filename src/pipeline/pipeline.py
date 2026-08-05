@@ -62,7 +62,15 @@ ProgressCallback = Callable[[str, str, int], None]
 _FETCH_MAX_ATTEMPTS = 3
 _FETCH_BASE_DELAY_SECONDS = 1.0
 
-# GitHub-only report-count reliability (PipelineConfig.num_reports):
+# Sources with no community/subreddit concept - a keyword is their
+# entire search query (GitHubFetcher's Search Issues call, HNFetcher's
+# Algolia call), and both support num_reports-driven oversampling the
+# same way. Reddit is deliberately excluded: its keyword is an optional
+# post-fetch filter over a chosen subreddit, not the whole query, so
+# num_reports/oversampling has no equivalent meaning there.
+_KEYWORD_DRIVEN_SOURCES = ("github", "hackernews", "hn")
+
+# GitHub/Hacker News-only report-count reliability (PipelineConfig.num_reports):
 # calculate_fetch_limit() decides how many discussions to request on
 # the first fetch for a given number of requested reports. Not every
 # discussion survives extraction/verification/dedup into a distinct
@@ -125,10 +133,11 @@ class PipelineConfig:
             source="reddit" (the default). Ignored by the mock fetcher,
             but still required by argparse/AnalyzeRequest for clarity
             about what a real run would target.
-        source: Which Fetcher to use - "reddit" (default) or "github".
-            Passed straight through to get_fetcher()'s own source
-            parameter (src/fetchers/__init__.py), which already
-            supported this before any caller actually passed it.
+        source: Which Fetcher to use - "reddit" (default), "github", or
+            "hackernews" (alias "hn"). Passed straight through to
+            get_fetcher()'s own source parameter (src/fetchers/__init__.py),
+            which already supported this before any caller actually
+            passed it.
         keyword: For Reddit, an optional keyword filter, passed
             through unchanged. Required (not optional) when
             source="github": GitHubFetcher takes no repo at all, and
@@ -376,13 +385,15 @@ class Pipeline:
                 search_keyword = expanded_terms[0]
                 logger.info("Query expanded from %r to: %s", self._config.keyword, expanded_terms)
 
-            # GitHubFetcher ignores FetchQuery.community entirely (issue
-            # search is keyword-driven - see github_fetcher.py); the
-            # keyword is passed here too only so log lines naming
-            # "community" print something meaningful for a GitHub run.
-            community = search_keyword or "" if self._config.source == "github" else self._config.subreddit
+            # GitHubFetcher/HNFetcher both ignore FetchQuery.community
+            # entirely (search is keyword-driven - see github_fetcher.py
+            # /hn_fetcher.py); the keyword is passed here too only so log
+            # lines naming "community" print something meaningful.
+            community = (
+                search_keyword or "" if self._config.source in _KEYWORD_DRIVEN_SOURCES else self._config.subreddit
+            )
             initial_limit = self._initial_fetch_limit()
-            if self._config.source == "github" and self._config.num_reports:
+            if self._config.source in _KEYWORD_DRIVEN_SOURCES and self._config.num_reports:
                 logger.info(
                     "User requested %d report(s). Fetching %d discussion(s) to guarantee quality after verification.",
                     self._config.num_reports,
@@ -399,6 +410,8 @@ class Pipeline:
 
             if self._config.source == "github":
                 self._emit(on_progress, "fetch", f"🔍 Searching GitHub for '{search_keyword}'...", 5)
+            elif self._config.source in ("hackernews", "hn"):
+                self._emit(on_progress, "fetch", f"🔍 Searching Hacker News for '{search_keyword}'...", 5)
             else:
                 self._emit(on_progress, "fetch", f"🔍 Fetching discussions from {community}...", 5)
             fetch_start = time.time()
@@ -434,7 +447,7 @@ class Pipeline:
 
             self._emit(on_progress, "report", "📝 Generating final report...", 95)
             insight_report = generate_report(clusters, verification_report, posts, ai_provider_label)
-            if self._config.source == "github" and self._config.num_reports:
+            if self._config.source in _KEYWORD_DRIVEN_SOURCES and self._config.num_reports:
                 if len(insight_report.top_opportunities) < self._config.num_reports:
                     logger.info(
                         "Note: Only %d of %d requested reports passed quality verification. "
@@ -512,28 +525,28 @@ class Pipeline:
         return PipelineRunResult(summary=summary, report=insight_report)
 
     def _initial_fetch_limit(self) -> int:
-        """post_limit for every run except a GitHub run with
+        """post_limit for every run except a GitHub/Hacker News run with
         num_reports set, where the first fetch instead requests
         calculate_fetch_limit(num_reports) discussions - never more
         than post_limit, which stays the hard ceiling regardless of
         what calculate_fetch_limit's own tiered multiplier/cap would
         otherwise allow.
         """
-        if self._config.source == "github" and self._config.num_reports:
+        if self._config.source in _KEYWORD_DRIVEN_SOURCES and self._config.num_reports:
             return min(calculate_fetch_limit(self._config.num_reports), self._config.post_limit)
         return self._config.post_limit
 
     def _should_oversample(self, clusters: List[OpportunityCluster], fetched_limit: int) -> bool:
-        """True only for a GitHub run with num_reports set, that came
-        up short of that many clusters, and still has headroom under
-        post_limit left to fetch more with. If fetched_limit already
-        equals post_limit, every available fetch has already happened -
-        coming up short at that point means genuinely fewer than
-        num_reports discussions exist, which is the documented,
+        """True only for a GitHub/Hacker News run with num_reports set,
+        that came up short of that many clusters, and still has headroom
+        under post_limit left to fetch more with. If fetched_limit
+        already equals post_limit, every available fetch has already
+        happened - coming up short at that point means genuinely fewer
+        than num_reports discussions exist, which is the documented,
         expected "return fewer than requested" outcome, not a bug to
         retry around.
         """
-        if self._config.source != "github" or not self._config.num_reports:
+        if self._config.source not in _KEYWORD_DRIVEN_SOURCES or not self._config.num_reports:
             return False
         return len(clusters) < self._config.num_reports and fetched_limit < self._config.post_limit
 

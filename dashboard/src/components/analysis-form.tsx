@@ -81,12 +81,13 @@ export function AnalysisForm() {
   const [error, setError] = React.useState<unknown>(null);
 
   function buildPayload(): AnalyzeRequest {
-    // GitHub has no mock equivalent (force_mock always returns Reddit's
-    // MockFetcher regardless of source - see src/fetchers/__init__.py),
-    // so a GitHub run always hits the real POST /analyze endpoint.
-    return source === "github"
+    // GitHub/HackerNews have no mock equivalent (force_mock always
+    // returns Reddit's MockFetcher regardless of source - see
+    // src/fetchers/__init__.py), so a run against either always hits
+    // the real POST /analyze endpoint.
+    return source === "github" || source === "hackernews"
       ? {
-          source: "github",
+          source,
           keyword: keyword.trim(),
           limit: Number(limit),
           use_cache: useCache,
@@ -123,7 +124,7 @@ export function AnalysisForm() {
   async function runViaPost() {
     setRunMode("post");
     try {
-      const response = await api.analyze(buildPayload(), source === "github" ? false : mockMode);
+      const response = await api.analyze(buildPayload(), source === "github" || source === "hackernews" ? false : mockMode);
       handleAnalysisComplete(response);
     } catch (err) {
       handleAnalysisError(err);
@@ -156,7 +157,7 @@ export function AnalysisForm() {
     // also only ever checked here, inside this event handler - never in
     // render, which would risk a server/client hydration mismatch since
     // EventSource doesn't exist during server rendering at all.
-    const shouldStream = source === "github" || !mockMode;
+    const shouldStream = source === "github" || source === "hackernews" || !mockMode;
     if (!shouldStream || typeof EventSource === "undefined") {
       await runViaPost();
       return;
@@ -191,6 +192,9 @@ export function AnalysisForm() {
                   <TabsTrigger value="github" disabled={isSubmitting}>
                     GitHub
                   </TabsTrigger>
+                  <TabsTrigger value="hackernews" disabled={isSubmitting}>
+                    HackerNews
+                  </TabsTrigger>
                 </TabsList>
               </Tabs>
             </div>
@@ -219,7 +223,9 @@ export function AnalysisForm() {
               ) : null}
 
               <div className="space-y-1.5">
-                <Label htmlFor="keyword">{source === "github" ? "What are you looking for?" : "Keyword (optional)"}</Label>
+                <Label htmlFor="keyword">
+                  {source === "github" || source === "hackernews" ? "What are you looking for?" : "Keyword (optional)"}
+                </Label>
                 <Input
                   id="keyword"
                   value={keyword}
@@ -239,7 +245,9 @@ export function AnalysisForm() {
                   <p className="text-sm text-muted-foreground">
                     {source === "github"
                       ? "Describe what you're looking for in plain English. MarketRadar will find the right repositories."
-                      : "Only include posts/comments containing this keyword."}
+                      : source === "hackernews"
+                        ? "MarketRadar will search HackerNews discussions for this topic."
+                        : "Only include posts/comments containing this keyword."}
                   </p>
                 )}
               </div>

@@ -13,6 +13,7 @@ from __future__ import annotations
 from src.config import Config
 from src.fetchers.base import Fetcher, FetcherError
 from src.fetchers.github_fetcher import GitHubFetcher
+from src.fetchers.hn_fetcher import HNFetcher
 from src.fetchers.mock_fetcher import MockFetcher
 from src.fetchers.reddit_fetcher import RedditFetcher
 
@@ -34,10 +35,16 @@ def get_fetcher(config: Config, *, source: str = "reddit", force_mock: bool = Fa
     credential; GITHUB_TOKEN only raises its rate limit, it doesn't
     gate whether GitHubFetcher can be used at all.
 
+    source="hackernews" (alias "hn") always returns a real HNFetcher
+    (unless force_mock) — Hacker News has no "configured" boolean
+    either, and no credential at all: the Algolia HN Search API is
+    public and unauthenticated, so there's nothing to gate on.
+
     Args:
         source: Which real source to use when not falling back to mock
-            — "reddit" (default) or "github". Wiring this into the CLI
-            /pipeline for GitHub is a separate, later task.
+            — "reddit" (default), "github", or "hackernews"/"hn".
+            Wiring this into the CLI for GitHub/Hacker News is a
+            separate, later task.
         force_mock: If True, always returns MockFetcher regardless of
             config or source — e.g. for a CLI --mock flag (see
             src/pipeline/). This is the sanctioned way to force mock
@@ -48,6 +55,8 @@ def get_fetcher(config: Config, *, source: str = "reddit", force_mock: bool = Fa
         return MockFetcher()
     if source == "github":
         return GitHubFetcher(config)
+    if source in ("hackernews", "hn"):
+        return HNFetcher(config)
     if config.reddit_configured:
         return RedditFetcher(config)
     return MockFetcher()
