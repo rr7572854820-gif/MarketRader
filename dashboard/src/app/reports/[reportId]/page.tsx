@@ -17,7 +17,7 @@ import { OpportunityScoresChart } from "@/components/charts/opportunity-scores-c
 import { VerificationDistributionChart } from "@/components/charts/verification-distribution-chart";
 import { api } from "@/lib/api/client";
 import { ApiError } from "@/lib/api/errors";
-import type { OpportunityEntry, ReportDetail } from "@/lib/api/types";
+import type { ExecutionSummary, OpportunityEntry, ReportDetail } from "@/lib/api/types";
 import { parseExecutiveSummary, parseOpportunitiesFromMarkdown } from "@/lib/parse-report-markdown";
 import { readCachedFreshReport } from "@/lib/report-cache";
 
@@ -135,27 +135,14 @@ export default function ReportDetailPage() {
         ) : null}
       </div>
 
-      {summary.errors.length > 0 ? (
-        <Card className="border-destructive/50">
-          <CardHeader>
-            <CardTitle className="text-base">Errors during this run</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <ul className="list-inside list-disc space-y-1 text-sm text-destructive">
-              {summary.errors.map((message, i) => (
-                <li key={i}>{message}</li>
-              ))}
-            </ul>
-          </CardContent>
-        </Card>
-      ) : null}
-
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatTile label="Discussions fetched" value={summary.posts_fetched} />
         <StatTile label="Discussions analyzed" value={summary.posts_analyzed} />
         <StatTile label="Opportunity clusters" value={summary.clusters_found} />
         <StatTile label="AI calls made" value={summary.ai_calls_made} />
       </div>
+
+      {summary.errors.length > 0 ? <RunNotes summary={summary} /> : null}
 
       <Card>
         <CardHeader>
@@ -230,5 +217,36 @@ function StatTile({ label, value }: { label: string; value: number }) {
         <p className="text-xs text-muted-foreground">{label}</p>
       </CardContent>
     </Card>
+  );
+}
+
+/** Same pattern as analysis-form.tsx's inline post-run summary (see its
+ * own comment for the full evidence-integrity reasoning): a calm gray
+ * ratio instead of a red error list, but never a dead end - the real
+ * backend text stays reachable one click away via "Show details" so
+ * this page and the inline summary never disagree about how much can
+ * actually be seen, just how loudly it's presented by default.
+ */
+function RunNotes({ summary }: { summary: ExecutionSummary }) {
+  const hasShortfall = summary.posts_analyzed < summary.posts_fetched;
+
+  return (
+    <div className="space-y-1.5">
+      <p className="text-sm text-muted-foreground">
+        {hasShortfall
+          ? `${summary.posts_analyzed} of ${summary.posts_fetched} fetched discussions could be analyzed.`
+          : `${summary.errors.length} note${summary.errors.length === 1 ? "" : "s"} from this run.`}
+      </p>
+      <details className="group">
+        <summary className="cursor-pointer text-xs text-muted-foreground underline-offset-2 hover:underline">
+          Show details
+        </summary>
+        <ul className="mt-2 list-inside list-disc space-y-1 font-mono text-xs text-muted-foreground">
+          {summary.errors.map((message, i) => (
+            <li key={i}>{message}</li>
+          ))}
+        </ul>
+      </details>
+    </div>
   );
 }
