@@ -47,6 +47,42 @@ Ideas worth considering later, explicitly not committed to now.
 
 ## Session Log
 
+## Session — 2026-08-05 (Parallel AI extraction + pipeline timing logs)
+
+### Current Objective
+Parallelize AI extraction (Extractor currently processes one FetchedPost at a time, sequentially) and add `⏱`-prefixed wall-clock timing logs around each pipeline stage.
+
+### Completed Work
+- Verified premises before writing code, per the task's own instruction: confirmed `Extractor` has no method that loops through multiple discussions at all (its only method, `extract(post)`, is strictly one-post-at-a-time) - the actual per-discussion loop lives in `Pipeline._analyze()`, a different method on a different class. The task's given code assumed a `self._extract_single`/internal `self._extract_all_parallel` call chain within `Extractor` that doesn't correspond to this codebase's real structure.
+- Found two real correctness risks before implementing (not just naming mismatches) and got explicit confirmation before proceeding, since both required crossing the stated boundary or changing tested behavior:
+  - **Cache thread-safety**: `ResponseCache.set()` (`src/pipeline/cache.py`) does an unlocked read-modify-write of the whole cache file on every call. Parallel extraction turns the already-named "unaddressed concurrency race... if the API ever receives truly simultaneous requests" (TODO.md) from a rare multi-process edge case into a near-certain one, within a single process, on almost every cache-enabled run. Authorized to add a `threading.Lock` to `ResponseCache.get()`/`set()`/`__len__` and `CachingAIProvider`'s hit/miss counters - a small, surgical, explicitly-approved exception to "don't touch cache.py". Also locked `_CountingAIProvider.call_count` in `pipeline.py` for the same reason (fully in-boundary, no approval needed).
+  - **Progress-callback ordering**: `Pipeline._analyze()`'s per-post `on_progress` events (built two tasks ago, tested) relied on strictly sequential, in-order completion for their monotonic-percent guarantee. Real parallel completion order can't preserve that. Authorized to switch to per-batch progress events (`"Analyzed X/Y discussions..."`, emitted from the main thread after each batch finishes) instead of per-post ones - coarser, but still monotonic and safe.
+- `Extractor` gained `BATCH_SIZE = 5`, `BATCH_DELAY = 1.5`, `_extract_single_safe()` (private, wraps `extract()` - not a nonexistent `_extract_single` - catching `InsightExtractionError`, logging, and optionally invoking an `on_error(post, exc)` callback so the specific per-post failure message isn't lost, only logged-and-dropped as originally specified), and `extract_all_parallel()` (deliberately **not** `_extract_all_parallel`/private - see its own docstring: it's meant to be called by an external orchestrator, Pipeline, so a leading underscore would misstate it as an internal-only detail).
+- `Pipeline._analyze()` now delegates to `extractor.extract_all_parallel(...)`, passing `on_error` (preserves the exact same `errors.append(f"Extraction failed for {post.url}: {exc}")` messages the dashboard's "Show details" disclosure - built two tasks ago - depends on) and `on_batch_complete` (per-batch progress, see above).
+- `⏱ Fetch:`/`⏱ Extract:`/`⏱ Cluster:`/`⏱ Total:` (`Total` = fetch+extract+cluster only, matching the task's own literal scope) added around the existing `_fetch`/`_analyze`/`_cluster` calls in `run()`, without duplicating their own existing internal logging.
+- **Found and fixed a real regression the change itself introduced**: the full suite went from ~9s to **189.74s** (confirmed by timing it) because many existing tests use >5 mocked posts, and `BATCH_DELAY`'s real 1.5s sleep now fired for real in every one of them. Added `tests/conftest.py` with an autouse fixture patching `Extractor.BATCH_DELAY` to 0 - not `time.sleep` itself, which was tried first and broke an unrelated test (`extractor.py` does `import time`, so patching `"...extractor.time.sleep"` patches the one shared `time` module process-wide, silently neutering that other test's own direct `time.sleep(1.1)` call - caught by running the full suite, not assumed). Suite is back to ~9.5s.
+- 5 new tests (4 in `tests/test_extractor.py`, 1 in `tests/test_pipeline.py`); full suite 231 → **236**.
+
+### Known Issues / Named Limitations
+- **The required "at least 2x improvement" verification does not hold against the currently-configured real provider (Groq).** Live-tested against the same real keyword/limit as the recorded baseline (10.5s, 5 fetched/4 analyzed, sequential): parallel extraction measured **20.8s** and **37.2s** across two separate real runs - slower, not faster. Root cause confirmed via real API logs, not guessed: firing `BATCH_SIZE` (5) concurrent requests trips Groq's free-tier rate limit (`429 Too Many Requests`), and the `groq` SDK's own built-in retry-with-backoff then adds multiple sequential multi-second waits (4s, 10s, 6s, 7s, 5s observed in one run) that cost far more than the concurrency saves. Isolated the parallelization mechanism itself with a simulated non-rate-limited provider (5x 1-second calls): sequential 5.0s vs. parallel 1.0s, a clean 5x speedup - so the code is correct and the mechanism works; the regression is specific to bursty concurrency against a rate-limited free-tier provider. Reported honestly rather than claiming the required 2x figure was met when live evidence showed the opposite.
+- No mitigation implemented (e.g. reduced per-batch concurrency, staggered start within a batch) - out of scope for this task as given; flagged for a future task to decide whether/how to address, since this means the feature can make real-world runs against Groq's free tier *slower* for anyone hitting its rate limit.
+- `MockAIProvider`-based tests can't and don't catch this (no rate limit, no I/O latency at all) - the regression is only observable against a real, rate-limited provider, which is exactly why it wasn't (and structurally couldn't be) caught by "all tests pass."
+
+### Important Decisions
+- Confirmed via `AskUserQuestion` before writing code: (1) allow a minimal lock in `cache.py` despite the stated boundary, (2) switch to per-batch progress events instead of per-post. Both directly required for correctness once extraction is genuinely parallel, not optional polish.
+- Did not fabricate a "2x improvement confirmed" claim to satisfy the task's own checklist - the live evidence said otherwise, and this project's evidence-integrity standard applies to Claude's own performance claims as much as to anything MarketRadar itself outputs.
+
+### Next Tasks
+- Decide whether to mitigate the Groq rate-limit regression (lower concurrency, request staggering/jitter, or making BATCH_SIZE provider-aware) or accept it as a documented tradeoff for providers without generous rate limits.
+
+### Questions
+None new.
+
+### Lessons Learned
+- A feature can be implemented correctly, pass every test, and still fail its own stated success criterion once measured against reality instead of assumed - the only way to know was to actually run it against the real, currently-configured provider twice and read the real API response codes, not to trust that "parallel is always faster" holds for every kind of workload.
+
+---
+
 ## Session — 2026-08-01 (Migrate GitHubFetcher onto BaseFetcher)
 
 ### Current Objective

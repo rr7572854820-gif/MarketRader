@@ -20,6 +20,19 @@ JSON validity means a retry always misses the cache and gets a real
 call — this is a generic heuristic, not a hard dependency on
 Extractor's or Aggregator's specific schemas, but it does assume (true
 for every current consumer) that a cacheable response is JSON-shaped.
+
+Thread-safety (added when Extractor.extract_all_parallel() started
+calling into this from multiple worker threads within one process):
+get()/set() and CachingAIProvider's hits/misses counters are all
+protected by a lock. Before this, a concurrent set() (unlocked
+read-modify-write of the whole cache dict, then a full file rewrite)
+risked corrupting the on-disk cache file under real concurrent access
+- previously only a theoretical, documented risk for "truly
+simultaneous API requests" (a separate process each), TODO.md; now a
+near-certain one every time two extraction batches produce cache
+misses close together. This is still explicitly not a general-purpose
+concurrent cache (still one file, still a full rewrite per set(), no
+eviction) - just safe for the concurrency this project actually has.
 """
 
 from __future__ import annotations
@@ -28,6 +41,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -69,6 +83,7 @@ class ResponseCache:
 
     def __init__(self, path: Path) -> None:
         self._path = path
+        self._lock = threading.Lock()
         self._data: Dict[str, Any] = self._load()
 
     def _load(self) -> Dict[str, Any]:
@@ -84,19 +99,24 @@ class ResponseCache:
         return data if isinstance(data, dict) else {}
 
     def get(self, key: str) -> Optional[str]:
-        value = self._data.get(key)
-        return value if isinstance(value, str) else None
+        with self._lock:
+            value = self._data.get(key)
+            return value if isinstance(value, str) else None
 
     def set(self, key: str, value: str) -> None:
-        self._data[key] = value
-        try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._path.write_text(json.dumps(self._data, indent=2), encoding="utf-8")
-        except OSError as exc:
-            logger.warning("Could not write cache file %s (%s) - continuing without persisting.", self._path, type(exc).__name__)
+        with self._lock:
+            self._data[key] = value
+            try:
+                self._path.parent.mkdir(parents=True, exist_ok=True)
+                self._path.write_text(json.dumps(self._data, indent=2), encoding="utf-8")
+            except OSError as exc:
+                logger.warning(
+                    "Could not write cache file %s (%s) - continuing without persisting.", self._path, type(exc).__name__
+                )
 
     def __len__(self) -> int:
-        return len(self._data)
+        with self._lock:
+            return len(self._data)
 
 
 class CachingAIProvider(AIProvider):
@@ -108,6 +128,7 @@ class CachingAIProvider(AIProvider):
     def __init__(self, wrapped: AIProvider, cache: ResponseCache) -> None:
         self._wrapped = wrapped
         self._cache = cache
+        self._counter_lock = threading.Lock()
         self.hits = 0
         self.misses = 0
 
@@ -118,10 +139,12 @@ class CachingAIProvider(AIProvider):
         key = hash_prompt(prompt)
         cached = self._cache.get(key)
         if cached is not None:
-            self.hits += 1
+            with self._counter_lock:
+                self.hits += 1
             return cached
 
-        self.misses += 1
+        with self._counter_lock:
+            self.misses += 1
         response = self._wrapped.generate_text(prompt)
         if _looks_like_json(response):
             self._cache.set(key, response)

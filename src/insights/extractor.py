@@ -1,16 +1,28 @@
-"""The Extractor: turns one FetchedPost into one DiscussionInsight.
+"""The Extractor: turns one FetchedPost into one DiscussionInsight, and
+extract_all_parallel(), which does that for many posts at once.
 
 Never imports google.genai or any provider SDK directly — the only AI
 access point is self._ai_provider.generate_text(), via the AIProvider
 interface (src/ai/base.py). This keeps Task 3 provider-agnostic in
 exactly the same way Task 2 kept the pipeline source-agnostic.
+
+extract_all_parallel() (not "_extract_all_parallel" as originally
+specified - see its own docstring) fans extract() out across a thread
+pool in fixed-size batches, with a short pause between batches as a
+courtesy to AI-provider rate limits. This is deliberately naive about
+work distribution (fixed batch size, not adaptive to response time),
+consistent with this project's "explicit over clever" standard - a
+provider taking longer just means a longer batch, not a rebalance.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import re
-from typing import Any, Dict, List, Optional
+import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable, Dict, List, Optional
 
 from src.ai import AIProvider, AIProviderError
 from src.insights.models import (
@@ -22,9 +34,19 @@ from src.insights.models import (
 from src.insights.prompts import build_extraction_prompt
 from src.models import FetchedPost
 
+logger = logging.getLogger(__name__)
+
 _MAX_ATTEMPTS = 2  # one retry if the model returns malformed/invalid JSON
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
+
+# (post, exception) for one failed extraction - passed to an optional
+# on_error callback so a caller (Pipeline) can record the specific
+# failure reason, not just a count. See extract_all_parallel().
+OnErrorCallback = Callable[[FetchedPost, Exception], None]
+# (completed_count, total_count) after one batch finishes. See
+# extract_all_parallel().
+OnBatchCompleteCallback = Callable[[int, int], None]
 
 
 class InsightExtractionError(Exception):
@@ -37,6 +59,9 @@ class InsightExtractionError(Exception):
 
 class Extractor:
     """Extracts one DiscussionInsight per FetchedPost, via any AIProvider."""
+
+    BATCH_SIZE = 2
+    BATCH_DELAY = 1.0
 
     def __init__(self, ai_provider: AIProvider) -> None:
         self._ai_provider = ai_provider
@@ -72,6 +97,84 @@ class Extractor:
         raise InsightExtractionError(
             f"Could not extract a valid insight after {_MAX_ATTEMPTS} attempts: {last_error}"
         )
+
+    def _extract_single_safe(
+        self, post: FetchedPost, on_error: Optional[OnErrorCallback] = None
+    ) -> Optional[DiscussionInsight]:
+        """extract() for one post, but never raises - returns None on
+        failure instead, after logging a warning and (if given) telling
+        on_error the specific post/exception, so a caller batching many
+        of these through a thread pool doesn't need its own per-item
+        try/except around each future.
+        """
+        try:
+            return self.extract(post)
+        except InsightExtractionError as exc:
+            logger.warning("Extraction failed for %s: %s", post.url, exc)
+            if on_error:
+                on_error(post, exc)
+            return None
+
+    def extract_all_parallel(
+        self,
+        posts: List[FetchedPost],
+        on_error: Optional[OnErrorCallback] = None,
+        on_batch_complete: Optional[OnBatchCompleteCallback] = None,
+    ) -> List[DiscussionInsight]:
+        """Extracts from every post, BATCH_SIZE at a time via a thread
+        pool (extraction is I/O-bound - waiting on the AI provider's
+        HTTP response - so threads, not processes, are the right tool,
+        same reasoning as BaseFetcher.fetch_parallel). A short
+        BATCH_DELAY pause between batches (never after the last one) is
+        a courtesy to AI-provider rate limits under this project's
+        free-tier providers.
+
+        Works identically regardless of which Fetcher produced `posts`
+        - this operates purely on the shared FetchedPost shape, after
+        fetching is already done, so GitHub/Reddit/any future source
+        all benefit with no source-specific code here.
+
+        Not named "_extract_all_parallel" (originally specified) or
+        called as an internal self._extract_all_parallel(...) from
+        inside extract() - unlike the class's other methods, this one
+        is meant to be called by an external orchestrator (Pipeline),
+        which is also the one that knows discussions - Extractor
+        itself only ever operates on `posts`/FetchedPost. A leading
+        underscore would misstate that as a private implementation
+        detail when it's this class's actual batch-extraction entry
+        point.
+
+        Per-item failures never abort the batch (same "one bad post
+        never aborts the run" principle as the pre-existing sequential
+        path) - on_error, if given, is how a caller recovers the exact
+        failure reason for reporting (e.g. Pipeline's own `errors`
+        list), since a bare None return can't carry it.
+        """
+        all_insights: List[DiscussionInsight] = []
+        total = len(posts)
+        processed = 0
+
+        batches = [posts[i : i + self.BATCH_SIZE] for i in range(0, total, self.BATCH_SIZE)]
+
+        for batch_num, batch in enumerate(batches):
+            with ThreadPoolExecutor(max_workers=self.BATCH_SIZE) as executor:
+                results = list(
+                    executor.map(lambda post: self._extract_single_safe(post, on_error), batch)
+                )
+
+            valid = [r for r in results if r is not None]
+            all_insights.extend(valid)
+            processed += len(batch)
+
+            logger.info("Extracted %d/%d", processed, total)
+            if on_batch_complete:
+                on_batch_complete(processed, total)
+
+            is_last = batch_num == len(batches) - 1
+            if not is_last:
+                time.sleep(self.BATCH_DELAY)
+
+        return all_insights
 
 
 def _combined_source_text(post: FetchedPost) -> str:

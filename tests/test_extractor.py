@@ -12,6 +12,7 @@ established in tests/test_cache.py.
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -249,3 +250,95 @@ def test_feature_requests_list_filters_blank_entries():
     insight = Extractor(provider).extract(_make_post())
 
     assert insight.feature_requests == ["Real request", "Another real one"]
+
+
+# --- extract_all_parallel ---------------------------------------------------------
+
+
+def _make_posts(n: int, fail_indices: frozenset = frozenset()) -> List[FetchedPost]:
+    posts = []
+    for i in range(n):
+        text = f"{_SOURCE_TEXT} FAIL_MARKER_{i}" if i in fail_indices else _SOURCE_TEXT
+        posts.append(
+            FetchedPost(
+                source="mock",
+                item_type="post",
+                id=f"post-{i}",
+                title="Reconciliation is painful",
+                text=text,
+                author="someone",
+                url=f"mock://sample/post-{i}",
+                created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                is_mock=True,
+            )
+        )
+    return posts
+
+
+class _MarkerBasedProvider(AIProvider):
+    """Returns valid extraction JSON normally, but malformed JSON (both
+    retry attempts - see Extractor._MAX_ATTEMPTS) for any prompt
+    containing "FAIL_MARKER" - lets a test control exactly which posts
+    succeed/fail through the real extract()/extract_all_parallel() path,
+    not by mocking internal methods directly.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def check_connection(self) -> None:
+        return
+
+    def generate_text(self, prompt: str) -> str:
+        self.calls += 1
+        if "FAIL_MARKER" in prompt:
+            return "not valid json"
+        return json.dumps(_valid_data())
+
+
+def test_extract_all_parallel_success():
+    provider = _FixedResponseProvider(json.dumps(_valid_data()))
+    posts = _make_posts(10)
+
+    insights = Extractor(provider).extract_all_parallel(posts)
+
+    assert len(insights) == 10
+
+
+def test_extract_batch_size_respected():
+    provider = _FixedResponseProvider(json.dumps(_valid_data()))
+    posts = _make_posts(12)
+    batch_completions: List[int] = []
+
+    Extractor(provider).extract_all_parallel(
+        posts, on_batch_complete=lambda done, total: batch_completions.append(done)
+    )
+
+    # Cumulative counts after each batch: 5, 10, 12 -> batches of 5, 5, 2 - proves
+    # BATCH_SIZE (5) was respected without inspecting thread-pool internals directly.
+    assert batch_completions == [5, 10, 12]
+
+
+def test_extract_failed_items_skipped():
+    provider = _MarkerBasedProvider()
+    posts = _make_posts(5, fail_indices=frozenset({1, 3}))
+
+    insights = Extractor(provider).extract_all_parallel(posts)  # must not raise
+
+    assert len(insights) == 3
+
+
+def test_extract_delay_between_batches(monkeypatch):
+    # Overrides tests/conftest.py's autouse BATCH_DELAY=0 (which exists
+    # so the rest of the suite doesn't pay a real 1.5s per batch) with a
+    # small-but-real, measurable value just for this test.
+    monkeypatch.setattr(Extractor, "BATCH_DELAY", 0.05)
+    provider = _FixedResponseProvider(json.dumps(_valid_data()))
+    posts = _make_posts(10)  # 2 batches of 5 -> exactly one delay between them
+
+    start = time.time()
+    Extractor(provider).extract_all_parallel(posts)
+    elapsed = time.time() - start
+
+    assert elapsed >= 0.05  # the one delay between batch 1 and batch 2 happened
+    assert elapsed < 0.05 * 3  # not also delayed after the last batch (would be ~2x this)

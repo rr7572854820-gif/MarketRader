@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -38,7 +39,7 @@ from src.config import Config, load_config
 from src.fetchers import FetcherError, get_fetcher
 from src.fetchers.base import Fetcher
 from src.insights.aggregator import Aggregator
-from src.insights.extractor import Extractor, InsightExtractionError
+from src.insights.extractor import Extractor
 from src.insights.keyword_extraction import extract_search_terms
 from src.insights.models import DiscussionInsight, OpportunityCluster
 from src.models import FetchedPost, FetchQuery
@@ -255,17 +256,25 @@ class _CountingAIProvider(AIProvider):
     GeminiProvider/MockAIProvider or the interface — a pure decorator,
     transparent to Extractor and Aggregator, which both already accept
     "any AIProvider" and have no idea this wrapping happened.
+
+    call_count is incremented under a lock: Extractor.extract_all_parallel()
+    calls generate_text() from multiple worker threads within one
+    Pipeline.run(), and a bare `+= 1` is not guaranteed atomic across
+    threads (load-add-store, not a single bytecode op) - without this,
+    ai_calls_made could undercount under real concurrent access.
     """
 
     def __init__(self, wrapped: AIProvider) -> None:
         self._wrapped = wrapped
+        self._lock = threading.Lock()
         self.call_count = 0
 
     def check_connection(self) -> None:
         self._wrapped.check_connection()
 
     def generate_text(self, prompt: str) -> str:
-        self.call_count += 1
+        with self._lock:
+            self.call_count += 1
         return self._wrapped.generate_text(prompt)
 
 
@@ -376,11 +385,23 @@ class Pipeline:
                 self._emit(on_progress, "fetch", f"🔍 Searching GitHub for '{search_keyword}'...", 5)
             else:
                 self._emit(on_progress, "fetch", f"🔍 Fetching discussions from {community}...", 5)
+            fetch_start = time.time()
             posts = self._fetch(fetcher, query, errors)
+            fetch_time = time.time() - fetch_start
+            logger.info("⏱ Fetch: %.1fs", fetch_time)
             self._emit(on_progress, "fetch", f"✅ Fetched {len(posts)} real discussions", 35)
 
+            extract_start = time.time()
             insights = self._analyze(posts, active_provider, errors, on_progress)
+            extract_time = time.time() - extract_start
+            logger.info("⏱ Extract: %.1fs", extract_time)
+
+            cluster_start = time.time()
             clusters = self._cluster(insights, active_provider, errors, on_progress)
+            cluster_time = time.time() - cluster_start
+            logger.info("⏱ Cluster: %.1fs", cluster_time)
+
+            logger.info("⏱ Total: %.1fs", fetch_time + extract_time + cluster_time)
 
             if self._should_oversample(clusters, initial_limit):
                 # No on_progress here - see run()'s own docstring on why
@@ -566,27 +587,33 @@ class Pipeline:
         errors: List[str],
         on_progress: Optional[ProgressCallback] = None,
     ) -> List[DiscussionInsight]:
+        """Extracts every post in parallel batches - see
+        Extractor.extract_all_parallel(). Progress is reported per
+        batch, not per post: real parallel completion order can't
+        preserve the old sequential loop's guarantee that percent only
+        ever increases (see extract_all_parallel's own docstring) -
+        per-batch events stay monotonic (always emitted from this
+        thread, after a whole batch finishes, in batch order) without
+        that risk, at the cost of coarser granularity during this stage.
+        """
         if not posts:
             return []
         extractor = Extractor(ai_provider)
-        insights: List[DiscussionInsight] = []
         total = len(posts)
-        # 40-65% distributed evenly by position in `posts`, not by how
-        # many have succeeded so far - keeps percent tied to "how far
-        # through the input we are" regardless of extraction outcome,
-        # so it can't move unpredictably slower/faster with the success
-        # rate (and stays trivially non-decreasing either way).
-        for i, post in enumerate(posts):
-            self._emit(on_progress, "analyze", f"🤖 Analyzing discussion {i + 1}/{total}...", 40 + round(25 * i / total))
-            try:
-                insight = extractor.extract(post)
-                insights.append(insight)
-                title = (post.title or post.url)[:50]
-                self._emit(on_progress, "analyze", f"💡 Extracted insights from {title}", 40 + round(25 * (i + 1) / total))
-            except InsightExtractionError as exc:
-                message = f"Extraction failed for {post.url}: {exc}"
-                errors.append(message)
-                logger.warning(message)
+
+        def on_error(post: FetchedPost, exc: Exception) -> None:
+            # Extractor._extract_single_safe already logs a warning for
+            # this internally - only the errors list (surfaced to the
+            # user, e.g. the dashboard's "Show details" disclosure)
+            # needs the specific message recorded here too.
+            errors.append(f"Extraction failed for {post.url}: {exc}")
+
+        def on_batch_complete(done: int, total_count: int) -> None:
+            self._emit(
+                on_progress, "analyze", f"🤖 Analyzed {done}/{total_count} discussions...", 40 + round(25 * done / total_count)
+            )
+
+        insights = extractor.extract_all_parallel(posts, on_error=on_error, on_batch_complete=on_batch_complete)
         logger.info("Analyzed %d of %d post(s).", len(insights), len(posts))
         return insights
 

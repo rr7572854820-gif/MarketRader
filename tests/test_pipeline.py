@@ -710,6 +710,25 @@ def test_full_pipeline_offline_mock_never_raises_and_produces_summary(tmp_path: 
     assert result.report is not None
 
 
+def test_pipeline_timing_logs_appear(tmp_path: Path, caplog):
+    config = PipelineConfig(
+        subreddit="test",
+        post_limit=3,
+        output_dir=tmp_path,
+        ai_provider="mock",
+        force_mock_fetch=True,
+        cache_path=tmp_path / "ai_cache.json",
+    )
+
+    with caplog.at_level("INFO", logger="src.pipeline.pipeline"):
+        Pipeline(config).run()
+
+    assert "⏱ Fetch:" in caplog.text
+    assert "⏱ Extract:" in caplog.text
+    assert "⏱ Cluster:" in caplog.text
+    assert "⏱ Total:" in caplog.text
+
+
 def test_pipeline_saves_valid_execution_summary_json(tmp_path: Path):
     config = PipelineConfig(
         subreddit="test", post_limit=2, output_dir=tmp_path, ai_provider="mock", force_mock_fetch=True
