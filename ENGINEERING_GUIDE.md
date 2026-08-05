@@ -113,6 +113,8 @@ src.reporting.models  ←  reporting.report_generator, reporting.formatter, api.
 src.reporting.{report_generator,formatter}  ←  pipeline ONLY (never api)
 src.pipeline.pipeline  ←  pipeline.runner, api.routes (ONLY these two)
 src.pipeline.cache  ←  pipeline.pipeline
+src.search.query_expander  ←  pipeline ONLY
+src.search.relevance_ranker  ←  fetchers.github_fetcher
 dashboard/*  ←  HTTP calls to src.api only, never a Python import (separate language/runtime)
 ```
 
@@ -132,7 +134,7 @@ dashboard/*  ←  HTTP calls to src.api only, never a Python import (separate la
 **Implementations**:
 - `RedditFetcher` (`reddit_fetcher.py`) — real, read-only, via PRAW. Fetches posts + their top-level comments as separate `FetchedPost` items (`item_type="post"`/`"comment"`).
 - `MockFetcher` (`mock_fetcher.py`) — a fixed, 7-item, clearly-labeled (`is_mock=True`) sample dataset. Zero network calls, zero credentials required.
-- `GitHubFetcher` (`github_fetcher.py`) — real, via the GitHub REST API (`requests`). Fetches open issues; folds each issue's comments into that single issue's `FetchedPost.text` (one `FetchedPost` per issue, not per comment — a deliberate simplification, see §21). Auth is optional (`GITHUB_TOKEN` only raises the rate limit, it doesn't gate availability).
+- `GitHubFetcher` (`github_fetcher.py`) — real, via the GitHub REST API (`requests`). Fetches open issues; folds each issue's comments into that single issue's `FetchedPost.text` (one `FetchedPost` per issue, not per comment — a deliberate simplification, see §21). Auth is optional (`GITHUB_TOKEN` only raises the rate limit, it doesn't gate availability). Search results pass through `RelevanceRanker.rank_github_issues()` (`src/search/relevance_ranker.py`) before being fetched — hard-excludes tutorial/intern/practice-project noise by name/title/body match, never on low engagement (see that module's own docstring for why it scores issues, not the repos they live in — this fetcher has no repo-level metadata like stars/forks available without an extra API call per repo, which would reintroduce the repo-discovery design already reverted, see this file's own docstring in-code).
 
 **Error handling**: `src/fetchers/exceptions.py` defines `FetcherAuthError`, `FetcherRateLimitError`, `FetcherNotFoundError` as **subclasses of `FetcherError`**, not a parallel hierarchy — `except FetcherError` still catches every fetcher's failures uniformly; the subclasses exist only so a caller that wants to be specific (e.g. "tell the user to add a token") can be, without every other caller needing to change.
 

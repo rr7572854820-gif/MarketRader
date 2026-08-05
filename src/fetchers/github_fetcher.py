@@ -42,6 +42,7 @@ from src.fetchers.exceptions import (
     FetcherRateLimitError,
 )
 from src.models import FetchedPost, FetchQuery
+from src.search.relevance_ranker import RelevanceRanker
 
 logger = logging.getLogger(__name__)
 
@@ -59,13 +60,24 @@ _DEFAULT_INVALID_MESSAGE = "GitHub API rejected the request as malformed."
 
 class GitHubFetcher(BaseFetcher):
     """Searches public GitHub issues directly for query.keyword via the
-    Search Issues API, then fetches each match's comments.
+    Search Issues API, ranks the matches for relevance, then fetches
+    each kept match's comments.
 
     query.community is not used - GitHub has no analogous concept here
     (see FetchQuery's own docstring: fetchers are free to ignore fields
     that don't apply to their source, the same way MockFetcher ignores
     most of the query). A keyword is required, not optional, for this
     fetcher specifically - it is the entire search query.
+
+    _discover_issues() (called from fetch(), before fetch_parallel())
+    merges/deduplicates results across search terms and hands them to
+    a RelevanceRanker (src/search/relevance_ranker.py), which hard-
+    excludes tutorial/intern/practice-project noise by name/title/body
+    match - see that module's own docstring for why this scores issues
+    directly rather than the repos they live in: this fetcher has no
+    repo-level metadata (stars/forks/topics) available, and fetching it
+    would mean reintroducing the repo-discovery design already reverted
+    above for dropping genuinely relevant results.
 
     Each issue becomes exactly one FetchedPost (item_type="post"); its
     comments are appended into that same post's text rather than
@@ -91,6 +103,7 @@ class GitHubFetcher(BaseFetcher):
 
     def __init__(self, config: Config) -> None:
         self._token = config.github_token
+        self.ranker = RelevanceRanker()
 
     def fetch(self, query: FetchQuery) -> List[FetchedPost]:
         """Search GitHub issues for query.keyword and fetch each match's
@@ -98,18 +111,66 @@ class GitHubFetcher(BaseFetcher):
 
         Raises:
             FetcherError: If query.keyword is missing/blank, if the
-                search query is rejected (422), or if zero issues match.
+                search query is rejected (422), if zero issues match, or
+                if every matched issue was excluded as tutorial/intern/
+                practice content (see _discover_issues).
             FetcherRateLimitError: The search API's own rate limit was
                 hit (403).
         """
         if not query.keyword:
             raise FetcherError("A keyword is required to search GitHub issues.")
 
-        issues = self._search_issues(query.keyword, query.limit)
-        if not issues:
-            raise FetcherError(f"No open GitHub issues found matching '{query.keyword}'.")
+        # Only ever a single-element list today - FetchQuery carries one
+        # str keyword (src/models.py, unchanged by this task) and
+        # Pipeline.run() only forwards QueryExpander's first expanded
+        # term (src/pipeline/pipeline.py). _discover_issues accepts a
+        # List[str] anyway so a future task can pass the remaining
+        # expanded terms through without this method's signature
+        # changing again.
+        issues = self._discover_issues([query.keyword], query.keyword, query.limit)
 
         return self.fetch_parallel(issues, self._issue_to_post)
+
+    def _discover_issues(self, search_terms: List[str], original_keyword: str, limit: int) -> List[Dict[str, Any]]:
+        """Search GitHub issues for each term in search_terms, merge the
+        results, deduplicate by "owner/repo#number", and rank by
+        relevance via RelevanceRanker.rank_github_issues() (hard-
+        excludes tutorial/intern/practice content; keeps everything
+        else - see that method's own docstring for why quiet-but-
+        relevant issues are never dropped just for low engagement).
+        """
+        all_issues: Dict[str, Dict[str, Any]] = {}
+
+        for term in search_terms:
+            try:
+                issues = self._search_issues(term, limit)
+            except (FetcherAuthError, FetcherRateLimitError):
+                # Account-wide problems, not specific to this search
+                # term - continuing to the next term would just repeat
+                # the same failure and bury it behind a misleading
+                # "no results found" message. Let it propagate.
+                raise
+            except FetcherError as exc:
+                logger.warning(f"Search failed for '{term}': {exc}")
+                continue
+
+            for issue in issues:
+                repo = _repo_from_repository_url(issue.get("repository_url") or "")
+                number = issue.get("number")
+                key = f"{repo}#{number}"
+                if key not in all_issues:
+                    all_issues[key] = issue
+
+        if not all_issues:
+            raise FetcherError(f"No open GitHub issues found matching '{original_keyword}'.")
+
+        ranked = self.ranker.rank_github_issues(list(all_issues.values()), original_keyword, top_n=limit)
+        if not ranked:
+            raise FetcherError(
+                f"Found GitHub issues matching '{original_keyword}', but all appeared to be "
+                "tutorial/practice/intern content."
+            )
+        return ranked
 
     def _search_issues(self, keyword: str, limit: int) -> List[Dict[str, Any]]:
         """Fetches up to `limit` open issues matching keyword, paging
