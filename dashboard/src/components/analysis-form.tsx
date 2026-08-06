@@ -55,7 +55,14 @@ function validate(source: Source, subreddit: string, keyword: string, limitRaw: 
 }
 
 export function AnalysisForm() {
-  const [source, setSource] = React.useState<Source>("reddit");
+  // Reddit is hidden from the Source toggle below (UI-only - the
+  // backend/API/pipeline/fetcher factory all still fully support
+  // source="reddit", see the TabsList below), so the default can't
+  // stay "reddit": that would boot the form with the Subreddit input
+  // and Mock mode switch visible (both gated on source === "reddit")
+  // with no visible tab explaining why. "github" is the first
+  // still-visible option.
+  const [source, setSource] = React.useState<Source>("github");
   const [subreddit, setSubreddit] = React.useState("all");
   const [keyword, setKeyword] = React.useState("");
   const [limit, setLimit] = React.useState("25");
@@ -186,9 +193,13 @@ export function AnalysisForm() {
                 onValueChange={(value) => setSource(value as Source)}
               >
                 <TabsList>
-                  <TabsTrigger value="reddit" disabled={isSubmitting}>
+                  {/* Reddit hidden from the dashboard UI only - source="reddit"
+                      stays fully supported everywhere else (backend, API,
+                      pipeline, fetcher factory all untouched). Re-add this
+                      TabsTrigger to bring it back. */}
+                  {/* <TabsTrigger value="reddit" disabled={isSubmitting}>
                     Reddit
-                  </TabsTrigger>
+                  </TabsTrigger> */}
                   <TabsTrigger value="github" disabled={isSubmitting}>
                     GitHub
                   </TabsTrigger>
