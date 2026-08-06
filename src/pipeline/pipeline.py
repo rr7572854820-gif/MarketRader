@@ -28,6 +28,7 @@ import json
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -67,8 +68,25 @@ _FETCH_BASE_DELAY_SECONDS = 1.0
 # Algolia call), and both support num_reports-driven oversampling the
 # same way. Reddit is deliberately excluded: its keyword is an optional
 # post-fetch filter over a chosen subreddit, not the whole query, so
-# num_reports/oversampling has no equivalent meaning there.
-_KEYWORD_DRIVEN_SOURCES = ("github", "hackernews", "hn")
+# num_reports/oversampling has no equivalent meaning there. "all" (see
+# _MULTI_SOURCE_EXPANSION) is included - it's github+hackernews fetched
+# together, so the same keyword-driven/oversample-eligible reasoning
+# applies to the combined run as a whole.
+_KEYWORD_DRIVEN_SOURCES = ("github", "hackernews", "hn", "all")
+
+# What source="all" actually fetches from, in parallel (_fetch_all_sources).
+# Reddit is deliberately excluded from this expansion even though it's a
+# real source - it has its own optional-keyword/subreddit-targeted
+# semantics (see _KEYWORD_DRIVEN_SOURCES above) that don't combine
+# cleanly with GitHub/Hacker News's keyword-is-the-whole-query model,
+# and (unlike them) it has a working mock fallback that a "combine every
+# source" run would need to special-case around for no clear benefit.
+_MULTI_SOURCE_EXPANSION = ("github", "hackernews")
+
+# Proper brand capitalization for the "all"-source progress message
+# (run()) - "github".title()/"hackernews".title() would produce
+# "Github"/"Hackernews", not "GitHub"/"Hacker News".
+_SOURCE_DISPLAY_NAMES = {"github": "GitHub", "hackernews": "Hacker News", "hn": "Hacker News"}
 
 # GitHub/Hacker News-only report-count reliability (PipelineConfig.num_reports):
 # calculate_fetch_limit() decides how many discussions to request on
@@ -133,11 +151,15 @@ class PipelineConfig:
             source="reddit" (the default). Ignored by the mock fetcher,
             but still required by argparse/AnalyzeRequest for clarity
             about what a real run would target.
-        source: Which Fetcher to use - "reddit" (default), "github", or
-            "hackernews" (alias "hn"). Passed straight through to
-            get_fetcher()'s own source parameter (src/fetchers/__init__.py),
-            which already supported this before any caller actually
-            passed it.
+        source: Which Fetcher to use - "reddit" (default), "github",
+            "hackernews" (alias "hn"), or "all" (GitHub + Hacker News
+            fetched simultaneously, results merged/deduplicated before
+            analysis - see run()'s own _fetch_all_sources()). Every
+            value except "all" is passed straight through to
+            get_fetcher()'s own source parameter (src/fetchers/__init__.py,
+            unchanged - "all" is expanded into _MULTI_SOURCE_EXPANSION
+            and fetched via one get_fetcher() call per real source
+            instead, since the factory itself has no "all" concept).
         keyword: For Reddit, an optional keyword filter, passed
             through unchanged. Required (not optional) when
             source="github": GitHubFetcher takes no repo at all, and
@@ -338,9 +360,13 @@ class Pipeline:
 
         try:
             app_config = load_config()
-            fetcher = get_fetcher(
-                app_config, source=self._config.source, force_mock=self._config.force_mock_fetch
-            )
+            # source="all" has no single fetcher to build up front - see
+            # _active_sources()/_fetch_all_sources(). force_mock collapses
+            # back to a single (mock) source regardless, since get_fetcher()
+            # always returns MockFetcher when force_mock=True no matter
+            # what source is passed.
+            active_sources = self._active_sources()
+            is_multi_source = len(active_sources) > 1
             ai_provider, ai_provider_label = _resolve_ai_provider_and_label(self._config, app_config)
 
             # Layering matters: counting must be *inside* caching, so a
@@ -354,8 +380,9 @@ class Pipeline:
                 caching_provider = CachingAIProvider(counting_provider, cache)
                 active_provider = caching_provider
 
-            # Natural-language query expansion (GitHub only): a user's
-            # free-text description ("problems with invoice
+            # Natural-language query expansion (GitHub and "all" runs,
+            # since "all" includes GitHub - see _MULTI_SOURCE_EXPANSION):
+            # a user's free-text description ("problems with invoice
             # automation") isn't itself a usable Search Issues query -
             # see src/search/query_expander.py. QueryExpander replaced
             # src.insights.keyword_extraction.extract_search_terms as
@@ -380,7 +407,7 @@ class Pipeline:
             # fragmenting what should be one consistent search.
             search_keyword = self._config.keyword
             expanded_terms: Optional[List[str]] = None
-            if self._config.source == "github" and self._config.keyword:
+            if self._config.source in ("github", "all") and self._config.keyword:
                 expanded_terms = QueryExpander(active_provider).expand(self._config.keyword)
                 search_keyword = expanded_terms[0]
                 logger.info("Query expanded from %r to: %s", self._config.keyword, expanded_terms)
@@ -408,14 +435,22 @@ class Pipeline:
                     )
             query = FetchQuery(community=community, keyword=search_keyword, keywords=expanded_terms, limit=initial_limit)
 
-            if self._config.source == "github":
+            fetcher: Optional[Fetcher] = None
+            if is_multi_source:
+                source_labels = " + ".join(_SOURCE_DISPLAY_NAMES.get(s, s) for s in active_sources)
+                self._emit(on_progress, "fetch", f"🔍 Searching {source_labels} for '{search_keyword}'...", 5)
+            elif self._config.source == "github":
                 self._emit(on_progress, "fetch", f"🔍 Searching GitHub for '{search_keyword}'...", 5)
             elif self._config.source in ("hackernews", "hn"):
                 self._emit(on_progress, "fetch", f"🔍 Searching Hacker News for '{search_keyword}'...", 5)
             else:
                 self._emit(on_progress, "fetch", f"🔍 Fetching discussions from {community}...", 5)
             fetch_start = time.time()
-            posts = self._fetch(fetcher, query, errors)
+            if is_multi_source:
+                posts = self._fetch_all_sources(app_config, active_sources, query, errors)
+            else:
+                fetcher = get_fetcher(app_config, source=active_sources[0], force_mock=self._config.force_mock_fetch)
+                posts = self._fetch(fetcher, query, errors)
             fetch_time = time.time() - fetch_start
             logger.info("⏱ Fetch: %.1fs", fetch_time)
             self._emit(on_progress, "fetch", f"✅ Fetched {len(posts)} real discussions", 35)
@@ -435,9 +470,16 @@ class Pipeline:
             if self._should_oversample(clusters, initial_limit):
                 # No on_progress here - see run()'s own docstring on why
                 # only the main pass reports progress.
-                posts, insights, clusters = self._oversample_for_report_count(
-                    fetcher, community, search_keyword, expanded_terms, posts, len(clusters), active_provider, errors
-                )
+                if is_multi_source:
+                    posts, insights, clusters = self._oversample_for_report_count_multi(
+                        app_config, active_sources, community, search_keyword, expanded_terms, posts,
+                        len(clusters), active_provider, errors,
+                    )
+                else:
+                    assert fetcher is not None  # set above whenever not is_multi_source
+                    posts, insights, clusters = self._oversample_for_report_count(
+                        fetcher, community, search_keyword, expanded_terms, posts, len(clusters), active_provider, errors
+                    )
 
             verification_report = self._verify(insights, posts, on_progress)
             ai_calls_made = counting_provider.call_count
@@ -536,6 +578,102 @@ class Pipeline:
             return min(calculate_fetch_limit(self._config.num_reports), self._config.post_limit)
         return self._config.post_limit
 
+    def _active_sources(self) -> List[str]:
+        """Which real source(s) this run actually fetches from.
+
+        source="all" expands to _MULTI_SOURCE_EXPANSION (GitHub + Hacker
+        News, both keyword-driven and credential-free) fetched in
+        parallel - see _fetch_all_sources(). force_mock collapses this
+        back to a single-item list even when source="all", since
+        get_fetcher() always returns Reddit's MockFetcher when
+        force_mock=True regardless of what source it's given (there is
+        no per-source mock variant to combine) - matching the
+        dashboard's own "no mock equivalent" handling for GitHub/Hacker
+        News/All Sources.
+        """
+        if self._config.source == "all" and not self._config.force_mock_fetch:
+            return list(_MULTI_SOURCE_EXPANSION)
+        return [self._config.source]
+
+    def _split_limit(self, total_limit: int, num_sources: int) -> int:
+        """Divides a combined fetch target evenly across multiple
+        sources (source="all" only) - e.g. a combined target of 30
+        discussions across 2 sources means each source's own
+        FetchQuery.limit becomes 15, so the two sources' results sum
+        back to roughly the original combined target instead of each
+        independently fetching the full amount (which would roughly
+        double the effective oversampling and API load).
+        """
+        return max(1, total_limit // num_sources)
+
+    def _fetch_from_source(
+        self, source: str, app_config: Config, query: FetchQuery, errors: List[str]
+    ) -> List[FetchedPost]:
+        """Fetches from exactly one source, in isolation - never raises.
+
+        FetcherError is already handled by self._fetch() (retries, then
+        records to `errors` and returns [] on final failure); the
+        try/except here only guards against something self._fetch()
+        itself doesn't expect (e.g. a bug inside get_fetcher() or a
+        fetcher's own internals), so that - this runs inside a
+        ThreadPoolExecutor worker, via _fetch_all_sources() - one
+        source's unexpected failure can never prevent collecting
+        another source's real results. Same per-item isolation
+        precedent as BaseFetcher.fetch_parallel's own safe_fetch
+        wrapper (src/fetchers/base.py) - not a new violation of
+        "exactly one broad except Exception" (ENGINEERING_GUIDE.md
+        §13): that claim was already inaccurate before this change
+        (fetch_parallel's safe_fetch already has one, for the identical
+        reason) - see SESSION.md.
+        """
+        try:
+            fetcher = get_fetcher(app_config, source=source, force_mock=False)
+            posts = self._fetch(fetcher, query, errors)
+            logger.info("%s: fetched %d discussion(s)", source, len(posts))
+            return posts
+        except Exception as exc:  # noqa: BLE001 — per-source isolation is the entire point here, see docstring
+            logger.warning("%s fetch failed: %s", source, exc)
+            errors.append(f"{source} fetch failed: {type(exc).__name__}: {exc}")
+            return []
+
+    def _fetch_all_sources(
+        self, app_config: Config, sources: List[str], query: FetchQuery, errors: List[str]
+    ) -> List[FetchedPost]:
+        """Fetches from multiple sources simultaneously via a thread
+        pool (I/O-bound HTTP calls, same "threads not processes"
+        reasoning as BaseFetcher.fetch_parallel) and merges the results
+        with the existing _merge_posts() dedup helper (by
+        FetchedPost.id - a genuine cross-source duplicate is
+        effectively impossible between GitHub and Hacker News, but kept
+        for consistency/defense in depth, and it's exactly what a
+        second oversample round already relies on for the single-source
+        case).
+
+        Each source's own FetchQuery.limit is query.limit split evenly
+        across `sources` (_split_limit) - the combined result still
+        targets roughly query.limit discussions overall, not
+        query.limit from every source independently.
+        """
+        logger.info("Fetching from %d source(s) simultaneously: %s", len(sources), sources)
+        per_source_limit = self._split_limit(query.limit, len(sources))
+        per_source_query = replace(query, limit=per_source_limit)
+
+        with ThreadPoolExecutor(max_workers=len(sources)) as executor:
+            futures = {
+                executor.submit(self._fetch_from_source, source, app_config, per_source_query, errors): source
+                for source in sources
+            }
+
+            all_posts: List[FetchedPost] = []
+            for future in futures:
+                source = futures[future]
+                results = future.result()  # _fetch_from_source never raises - see its own docstring
+                all_posts = _merge_posts(all_posts, results)
+                logger.info("%s: %d discussion(s) added (%d total after dedup)", source, len(results), len(all_posts))
+
+        logger.info("Total combined: %d discussion(s)", len(all_posts))
+        return all_posts
+
     def _should_oversample(self, clusters: List[OpportunityCluster], fetched_limit: int) -> bool:
         """True only for a GitHub/Hacker News run with num_reports set,
         that came up short of that many clusters, and still has headroom
@@ -599,6 +737,54 @@ class Pipeline:
                 self._config.num_reports,
                 len(merged_posts),
                 search_keyword,
+            )
+        return merged_posts, insights, clusters
+
+    def _oversample_for_report_count_multi(
+        self,
+        app_config: Config,
+        active_sources: List[str],
+        community: str,
+        search_keyword: Optional[str],
+        expanded_terms: Optional[List[str]],
+        posts: List[FetchedPost],
+        clusters_so_far: int,
+        active_provider: AIProvider,
+        errors: List[str],
+    ) -> Tuple[List[FetchedPost], List[DiscussionInsight], List[OpportunityCluster]]:
+        """The source="all" equivalent of _oversample_for_report_count()
+        - same one-more-round, re-analyze-from-scratch-over-the-merged-
+        set shape (see that method's own docstring); a separate method
+        rather than a shared one because there's no single `fetcher` to
+        reuse here - every active source is fetched again via
+        _fetch_all_sources(), each getting its own even split of
+        post_limit (see _split_limit), exactly like the initial fetch.
+        """
+        logger.info(
+            "Only %d/%d requested report(s) found from %d discussion(s); fetching more from %s (up to the "
+            "%d-discussion limit) before giving up.",
+            clusters_so_far,
+            self._config.num_reports,
+            len(posts),
+            active_sources,
+            self._config.post_limit,
+        )
+        query = FetchQuery(
+            community=community, keyword=search_keyword, keywords=expanded_terms, limit=self._config.post_limit
+        )
+        more_posts = self._fetch_all_sources(app_config, active_sources, query, errors)
+        merged_posts = _merge_posts(posts, more_posts)
+        insights = self._analyze(merged_posts, active_provider, errors)
+        clusters = self._cluster(insights, active_provider, errors)
+        if len(clusters) < self._config.num_reports:
+            logger.info(
+                "Still only %d/%d requested report(s) after oversampling - only %d distinct discussion(s) "
+                "were available for search terms %r across %s.",
+                len(clusters),
+                self._config.num_reports,
+                len(merged_posts),
+                search_keyword,
+                active_sources,
             )
         return merged_posts, insights, clusters
 

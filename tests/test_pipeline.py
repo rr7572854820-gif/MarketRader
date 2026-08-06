@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
@@ -616,6 +617,214 @@ def test_num_reports_ignored_for_non_github_source(tmp_path: Path, monkeypatch):
     assert fetcher.calls == [10]  # post_limit directly, never 3x num_reports
     assert result.summary.clusters_found == 2
     assert len(result.report.top_opportunities) == 2  # not capped/truncated to num_reports
+
+
+# --- Multi-source fetching (source="all") -------------------------------------
+
+
+def _make_fetcher(posts: List[FetchedPost], *, delay: float = 0.0, calls: list | None = None) -> Fetcher:
+    """A minimal Fetcher stub returning a fixed list of posts, optionally
+    recording the FetchQuery it was called with (for limit/dedup
+    assertions) and/or sleeping first (for the parallelism timing test).
+    """
+
+    class _StubFetcher(Fetcher):
+        def fetch(self, query: FetchQuery) -> List[FetchedPost]:
+            if calls is not None:
+                calls.append(query.limit)
+            if delay:
+                time.sleep(delay)
+            return posts
+
+    return _StubFetcher()
+
+
+def _make_failing_fetcher(exc: Exception) -> Fetcher:
+    class _FailingFetcher(Fetcher):
+        def fetch(self, query: FetchQuery) -> List[FetchedPost]:
+            raise exc
+
+    return _FailingFetcher()
+
+
+def _post(post_id: str) -> FetchedPost:
+    return FetchedPost(
+        source="test",
+        item_type="post",
+        id=post_id,
+        title=f"title {post_id}",
+        text=f"text {post_id}",
+        author="someone",
+        url=f"https://example.com/{post_id}",
+        created_at=datetime.now(timezone.utc),
+    )
+
+
+def test_all_source_fetches_both(tmp_path: Path, monkeypatch):
+    """source="all" must fetch from both GitHub and Hacker News and
+    combine their results - 10 distinct posts from each source, 20
+    total, none dropped.
+    """
+    import src.pipeline.pipeline as pipeline_module
+
+    github_posts = [_post(f"github-{i}") for i in range(10)]
+    hn_posts = [_post(f"hn-{i}") for i in range(10)]
+
+    def _stub_get_fetcher(config, *, source="reddit", force_mock=False):
+        if source == "github":
+            return _make_fetcher(github_posts)
+        if source == "hackernews":
+            return _make_fetcher(hn_posts)
+        raise AssertionError(f"unexpected source: {source}")
+
+    monkeypatch.setattr(pipeline_module, "get_fetcher", _stub_get_fetcher)
+
+    config = PipelineConfig(
+        source="all", keyword="invoicing", post_limit=20, output_dir=tmp_path, ai_provider="mock",
+        cache_path=tmp_path / "ai_cache.json",
+    )
+    result = Pipeline(config).run()
+
+    assert result.summary.posts_fetched == 20
+
+
+def test_all_source_parallel_execution(tmp_path: Path, monkeypatch):
+    """Both sources must be fetched simultaneously (ThreadPoolExecutor),
+    not sequentially - two 1-second fetches should take ~1s total, not
+    ~2s, or _fetch_all_sources has silently regressed to a sequential loop.
+    """
+    import src.pipeline.pipeline as pipeline_module
+
+    def _stub_get_fetcher(config, *, source="reddit", force_mock=False):
+        return _make_fetcher([_post(f"{source}-1")], delay=1.0)
+
+    monkeypatch.setattr(pipeline_module, "get_fetcher", _stub_get_fetcher)
+
+    config = PipelineConfig(
+        source="all", keyword="invoicing", post_limit=10, output_dir=tmp_path, ai_provider="mock",
+        cache_path=tmp_path / "ai_cache.json",
+    )
+    start = time.time()
+    Pipeline(config).run()
+    elapsed = time.time() - start
+
+    assert elapsed < 2.0  # would be >= 2.0 if the two 1s fetches ran sequentially
+
+
+def test_one_source_failure_continues(tmp_path: Path, monkeypatch):
+    """A completely unexpected failure from one source (not a FetcherError
+    - already covered by self._fetch()'s own retry/error-recording - but
+    a genuine bug/exception inside get_fetcher() or a fetcher's own
+    internals) must not prevent the other source's real results from
+    coming through, and must not raise out of run().
+    """
+    import src.pipeline.pipeline as pipeline_module
+
+    hn_posts = [_post(f"hn-{i}") for i in range(10)]
+
+    def _stub_get_fetcher(config, *, source="reddit", force_mock=False):
+        if source == "github":
+            return _make_failing_fetcher(RuntimeError("simulated unexpected failure"))
+        if source == "hackernews":
+            return _make_fetcher(hn_posts)
+        raise AssertionError(f"unexpected source: {source}")
+
+    monkeypatch.setattr(pipeline_module, "get_fetcher", _stub_get_fetcher)
+
+    config = PipelineConfig(
+        source="all", keyword="invoicing", post_limit=20, output_dir=tmp_path, ai_provider="mock",
+        cache_path=tmp_path / "ai_cache.json",
+    )
+    result = Pipeline(config).run()  # must not raise
+
+    assert result.summary.succeeded is True
+    assert result.summary.posts_fetched == 10
+    assert any("github" in e.lower() for e in result.summary.errors)
+
+
+def test_single_source_unchanged(tmp_path: Path, monkeypatch):
+    """source="github" (not "all") must still call get_fetcher exactly
+    once, for "github" only - the pre-existing single-source path is
+    untouched by the multi-source addition.
+    """
+    import src.pipeline.pipeline as pipeline_module
+
+    calls: List[str] = []
+
+    def _stub_get_fetcher(config, *, source="reddit", force_mock=False):
+        calls.append(source)
+        return _make_fetcher([_post("issue-1")])
+
+    monkeypatch.setattr(pipeline_module, "get_fetcher", _stub_get_fetcher)
+
+    config = PipelineConfig(
+        source="github", keyword="invoicing", post_limit=5, output_dir=tmp_path, ai_provider="mock",
+        cache_path=tmp_path / "ai_cache.json",
+    )
+    result = Pipeline(config).run()
+
+    assert calls == ["github"]
+    assert result.summary.posts_fetched == 1
+
+
+def test_oversample_split_between_sources(tmp_path: Path, monkeypatch):
+    """num_reports-driven oversampling for source="all" must split the
+    combined fetch target evenly across the two active sources, not
+    request the full target from each independently. calculate_fetch_limit(10)
+    is 30 (3x multiplier for a small request, see calculate_fetch_limit's
+    own docstring) - split across 2 sources, each FetchQuery.limit is 15,
+    so the two sources' results sum back to the original 30-discussion
+    combined target.
+
+    post_limit is deliberately set equal to that same 30 (not left at a
+    generous default) so _should_oversample's own "still has headroom
+    under post_limit" check is false regardless of how few clusters this
+    test's minimal stub data produces - this isolates the *initial*
+    fetch's split from the separate (and separately-covered, by
+    test_one_source_failure_continues/test_all_source_fetches_both's own
+    non-oversampling setup) retry-round behavior.
+    """
+    import src.pipeline.pipeline as pipeline_module
+
+    limits_seen: List[int] = []
+
+    def _stub_get_fetcher(config, *, source="reddit", force_mock=False):
+        return _make_fetcher([_post(f"{source}-1")], calls=limits_seen)
+
+    monkeypatch.setattr(pipeline_module, "get_fetcher", _stub_get_fetcher)
+
+    assert calculate_fetch_limit(10) == 30
+    config = PipelineConfig(
+        source="all", keyword="invoicing", post_limit=30, num_reports=10, output_dir=tmp_path, ai_provider="mock",
+        cache_path=tmp_path / "ai_cache.json",
+    )
+    Pipeline(config).run()
+
+    assert limits_seen == [15, 15]
+
+
+def test_combined_discussions_deduplicated(tmp_path: Path, monkeypatch):
+    """The exact same discussion (same FetchedPost.id) returned by both
+    sources must appear only once in the combined, analyzed result -
+    _fetch_all_sources merges via the same _merge_posts() dedup helper
+    the oversample-retry path already relies on.
+    """
+    import src.pipeline.pipeline as pipeline_module
+
+    shared_post = _post("shared-1")
+
+    def _stub_get_fetcher(config, *, source="reddit", force_mock=False):
+        return _make_fetcher([shared_post])
+
+    monkeypatch.setattr(pipeline_module, "get_fetcher", _stub_get_fetcher)
+
+    config = PipelineConfig(
+        source="all", keyword="invoicing", post_limit=20, output_dir=tmp_path, ai_provider="mock",
+        cache_path=tmp_path / "ai_cache.json",
+    )
+    result = Pipeline(config).run()
+
+    assert result.summary.posts_fetched == 1
 
 
 # --- _CountingAIProvider -----------------------------------------------------

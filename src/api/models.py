@@ -48,15 +48,25 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from src.insights.models import ConfidenceLevel
 
 ReportFormat = Literal["terminal", "markdown", "both"]
-Source = Literal["reddit", "github", "hackernews", "hn"]
+Source = Literal["reddit", "github", "hackernews", "hn", "all"]
 
 
 class AnalyzeRequest(BaseModel):
     keyword: Optional[str] = Field(
-        default=None, description="Only include posts/comments containing this keyword (case-insensitive). Blank/whitespace-only is treated as no filter for Reddit, same as the CLI - but required when source='github' or source='hackernews'/'hn', where it is the entire search query (no repository/subreddit needed)."
+        default=None, description="Only include posts/comments containing this keyword (case-insensitive). Blank/whitespace-only is treated as no filter for Reddit, same as the CLI - but required when source='github', source='hackernews'/'hn', or source='all', where it is the entire search query (no repository/subreddit needed)."
     )
-    subreddit: str = Field(default="all", min_length=1, description="Subreddit to fetch from, without 'r/'. Ignored when source='github'/'hackernews'/'hn' or against mock data, but still validated.")
-    source: Source = Field(default="reddit", description="Which Fetcher to use - 'reddit' (default), 'github', or 'hackernews' (alias 'hn').")
+    subreddit: str = Field(default="all", min_length=1, description="Subreddit to fetch from, without 'r/'. Ignored when source is 'github'/'hackernews'/'hn'/'all' or against mock data, but still validated.")
+    source: Source = Field(
+        default="reddit",
+        description=(
+            "Which Fetcher to use - 'reddit' (default, backward-compatible - see below), 'github', "
+            "'hackernews' (alias 'hn'), or 'all' (GitHub + Hacker News fetched simultaneously, results merged - "
+            "no Reddit, no mock fallback, requires keyword). The default stays 'reddit' for this field itself "
+            "(existing callers that omit source keep their current behavior unchanged) - the dashboard's own "
+            "Source toggle defaults to 'all' client-side instead, so new UI users still get it as the default "
+            "experience without changing what an unspecified API request does."
+        ),
+    )
     limit: int = Field(default=25, ge=1, le=100, description="Maximum posts to fetch. Capped at 100 for this API (see module docstring). Remains the hard ceiling even when num_reports is set.")
     num_reports: Optional[int] = Field(
         default=None,
@@ -64,8 +74,8 @@ class AnalyzeRequest(BaseModel):
         le=100,
         description=(
             "Desired number of final opportunity reports (top_opportunities entries) after extraction, "
-            "verification, and deduplication. Only meaningful when source='github' - ignored for source='reddit', "
-            "the same way subreddit is ignored for source='github'. When set, the pipeline fetches more than this "
+            "verification, and deduplication. Only meaningful when source is 'github', 'hackernews'/'hn', or "
+            "'all' - ignored for source='reddit', the same way subreddit is ignored for those sources. When set, the pipeline fetches more than this "
             "many discussions (up to `limit`, which is never exceeded) and retries once with more discussions if "
             "still short. Returning fewer than requested is expected, not an error, whenever `limit` or genuinely "
             "available discussions run out first - see PipelineConfig.num_reports for the full behavior."
@@ -92,8 +102,8 @@ class AnalyzeRequest(BaseModel):
 
     @model_validator(mode="after")
     def _require_keyword_for_github_source(self) -> "AnalyzeRequest":
-        if self.source in ("github", "hackernews", "hn") and not self.keyword:
-            raise ValueError("keyword is required for GitHub/Hacker News source")
+        if self.source in ("github", "hackernews", "hn", "all") and not self.keyword:
+            raise ValueError("keyword is required for GitHub/Hacker News/All Sources")
         return self
 
 

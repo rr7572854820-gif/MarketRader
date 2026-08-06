@@ -30,6 +30,17 @@ interface FieldErrors {
   limit?: string;
 }
 
+/** Reddit is the only source with a real Mock fetcher behind it
+ * (force_mock always returns Reddit's MockFetcher regardless of source
+ * - see src/fetchers/__init__.py) - GitHub, Hacker News, and "all"
+ * (which combines them) have no mock equivalent, so a run against any
+ * of them always hits the real POST /analyze endpoint and always
+ * streams (GET /analyze/stream has no mock variant either).
+ */
+function hasNoMockEquivalent(source: Source): boolean {
+  return source !== "reddit";
+}
+
 function validate(source: Source, subreddit: string, keyword: string, limitRaw: string): FieldErrors {
   const errors: FieldErrors = {};
   if (source === "reddit") {
@@ -60,9 +71,12 @@ export function AnalysisForm() {
   // source="reddit", see the TabsList below), so the default can't
   // stay "reddit": that would boot the form with the Subreddit input
   // and Mock mode switch visible (both gated on source === "reddit")
-  // with no visible tab explaining why. "github" is the first
-  // still-visible option.
-  const [source, setSource] = React.useState<Source>("github");
+  // with no visible tab explaining why. "all" (GitHub + Hacker News
+  // together) is the new default - the API's own AnalyzeRequest.source
+  // default deliberately stays "reddit" for backward compatibility
+  // (see src/api/models.py), so this default lives here, client-side,
+  // rather than relying on omitting `source` from the request body.
+  const [source, setSource] = React.useState<Source>("all");
   const [subreddit, setSubreddit] = React.useState("all");
   const [keyword, setKeyword] = React.useState("");
   const [limit, setLimit] = React.useState("25");
@@ -88,11 +102,7 @@ export function AnalysisForm() {
   const [error, setError] = React.useState<unknown>(null);
 
   function buildPayload(): AnalyzeRequest {
-    // GitHub/HackerNews have no mock equivalent (force_mock always
-    // returns Reddit's MockFetcher regardless of source - see
-    // src/fetchers/__init__.py), so a run against either always hits
-    // the real POST /analyze endpoint.
-    return source === "github" || source === "hackernews"
+    return hasNoMockEquivalent(source)
       ? {
           source,
           keyword: keyword.trim(),
@@ -131,7 +141,7 @@ export function AnalysisForm() {
   async function runViaPost() {
     setRunMode("post");
     try {
-      const response = await api.analyze(buildPayload(), source === "github" || source === "hackernews" ? false : mockMode);
+      const response = await api.analyze(buildPayload(), hasNoMockEquivalent(source) ? false : mockMode);
       handleAnalysisComplete(response);
     } catch (err) {
       handleAnalysisError(err);
@@ -164,7 +174,7 @@ export function AnalysisForm() {
     // also only ever checked here, inside this event handler - never in
     // render, which would risk a server/client hydration mismatch since
     // EventSource doesn't exist during server rendering at all.
-    const shouldStream = source === "github" || source === "hackernews" || !mockMode;
+    const shouldStream = hasNoMockEquivalent(source) || !mockMode;
     if (!shouldStream || typeof EventSource === "undefined") {
       await runViaPost();
       return;
@@ -200,6 +210,9 @@ export function AnalysisForm() {
                   {/* <TabsTrigger value="reddit" disabled={isSubmitting}>
                     Reddit
                   </TabsTrigger> */}
+                  <TabsTrigger value="all" disabled={isSubmitting}>
+                    All Sources
+                  </TabsTrigger>
                   <TabsTrigger value="github" disabled={isSubmitting}>
                     GitHub
                   </TabsTrigger>
@@ -235,7 +248,7 @@ export function AnalysisForm() {
 
               <div className="space-y-1.5">
                 <Label htmlFor="keyword">
-                  {source === "github" || source === "hackernews" ? "What are you looking for?" : "Keyword (optional)"}
+                  {hasNoMockEquivalent(source) ? "What are you looking for?" : "Keyword (optional)"}
                 </Label>
                 <Input
                   id="keyword"
@@ -254,11 +267,13 @@ export function AnalysisForm() {
                   </p>
                 ) : (
                   <p className="text-sm text-muted-foreground">
-                    {source === "github"
-                      ? "Describe what you're looking for in plain English. MarketRadar will find the right repositories."
-                      : source === "hackernews"
-                        ? "MarketRadar will search HackerNews discussions for this topic."
-                        : "Only include posts/comments containing this keyword."}
+                    {source === "all"
+                      ? "MarketRadar searches GitHub and HackerNews simultaneously for the most comprehensive results."
+                      : source === "github"
+                        ? "Describe what you're looking for in plain English. MarketRadar will find the right repositories."
+                        : source === "hackernews"
+                          ? "MarketRadar will search HackerNews discussions for this topic."
+                          : "Only include posts/comments containing this keyword."}
                   </p>
                 )}
               </div>

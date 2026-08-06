@@ -281,6 +281,22 @@ def test_analyze_github_valid(client: TestClient, monkeypatch):
     assert config.post_limit == 5
 
 
+def test_api_accepts_all_source(client: TestClient, monkeypatch):
+    """source="all" (GitHub + Hacker News together) must be a valid,
+    accepted AnalyzeRequest.source value - no 422, reaches Pipeline with
+    source="all" intact (routes.py itself needs no source-specific
+    branching - see src/pipeline/pipeline.py for where "all" actually
+    gets expanded into two real fetches).
+    """
+    monkeypatch.setattr(routes, "Pipeline", _RecordingPipelineStub)
+    response = client.post("/analyze", json={"source": "all", "keyword": "invoicing", "limit": 10})
+
+    assert response.status_code == 200
+    config = _RecordingPipelineStub.last_config
+    assert config.source == "all"
+    assert config.keyword == "invoicing"
+
+
 def test_analyze_mock_endpoint_forces_mock_even_with_stubbed_pipeline(client: TestClient, monkeypatch):
     monkeypatch.setattr(routes, "Pipeline", _RecordingPipelineStub)
     client.post("/analyze/mock", json={"limit": 1})
