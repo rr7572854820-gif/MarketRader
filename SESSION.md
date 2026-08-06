@@ -47,6 +47,38 @@ Ideas worth considering later, explicitly not committed to now.
 
 ## Session Log
 
+## Session — 2026-08-06 (Post-extraction cooldown before clustering, and one rejected variant of it)
+
+### Current Objective
+Add a pause between extraction and clustering in `Pipeline.run()`, giving Groq's rate-limit window room to reset after extraction's own real, measured burst before clustering's single AI call fires, without slowing down the test suite.
+
+### Completed Work
+- **A closely preceding, separate task** (same session, immediately prior) asked for the same underlying concern solved a different way - a bare `time.sleep(3)` directly inside `Aggregator._ai_cluster()`. Flagged and declined there via `AskUserQuestion`: `_ai_cluster()` is exercised directly by 11 tests in `tests/test_aggregator.py`, each of which would have paid a real 3-second cost with no way to patch it out within that task's single-file (`aggregator.py` only) boundary - the exact test-suite-speed regression this codebase already hit and fixed once (`Extractor.BATCH_DELAY`). This task supersedes that one: the pause now lives in `pipeline.py` (between the existing `⏱ Extract`/`⏱ Cluster` timing blocks, in `run()`, not inside `Aggregator` at all), with a same-shaped `conftest.py` fixture explicitly required and provided, so the same regression can't recur here.
+- Read `tests/conftest.py`'s existing `_no_real_batch_delay` fixture first, per the task's own instruction, and followed its exact established pattern: patch the constant by name (`_POST_EXTRACTION_DELAY_SECONDS`), never `time.sleep` itself - `pipeline.py` does `import time` (not `from time import sleep`), so patching `"...pipeline.time.sleep"` would patch the one shared `time` module process-wide, the same footgun that fixture's own docstring already documents hitting once for `extractor.py`.
+- `src/pipeline/pipeline.py`: new module-level `_POST_EXTRACTION_DELAY_SECONDS = 3.0` (named to match this file's own existing `_FETCH_BASE_DELAY_SECONDS` convention, not the given bare `POST_EXTRACTION_DELAY` name, for consistency with every other tunable delay constant already in this file). `time.sleep(_POST_EXTRACTION_DELAY_SECONDS)` inserted between the existing `logger.info("⏱ Extract: ...")` line and `cluster_start = time.time()` - deliberately outside both `extract_time` and `cluster_time`'s own measurement windows, so those two timing logs keep meaning exactly what they already say (actual extraction/clustering work only), with the cooldown as a distinct, unmeasured gap in between. No `import time` added - already imported at module level.
+- `tests/conftest.py`: new autouse `_no_real_post_extraction_delay` fixture, patching `_POST_EXTRACTION_DELAY_SECONDS` to `0`, directly alongside (same file, same shape as) the existing `_no_real_batch_delay` fixture.
+- Full suite: 276 passed (unchanged - excluding the 2 pre-existing, unrelated `test_extractor.py` failures named in earlier entries). Timed explicitly to confirm the fixture actually neutralizes the new sleep, not just that tests still pass: `--durations=15` showed no clustering/cooldown-related test anywhere near the slowest (the top two, at 3.00s each, are pre-existing `test_fetch_retry_*` tests exercising the unrelated, already-existing `_fetch_with_retry` backoff) - confirmed, not assumed.
+- **Live-verified, in isolation, that the cooldown does what it's supposed to and nothing more**: ran a full mock pipeline once with `Extractor.BATCH_DELAY` also neutralized (matching what pytest's own fixture already does, but this run was a standalone script, outside pytest, where that fixture doesn't apply) - every stage timing (`⏱ Fetch`/`⏱ Extract`/`⏱ Cluster`/`⏱ Total`) read `0.0s`, yet the pipeline still took a real, measured 3.0s wall-clock - isolating the cooldown's exact, sole contribution, not just inferring it from a noisier combined number. A second real-provider check (`source="github"`, real fetch, mock AI to avoid conflating this with the already-documented, separate Groq-rate-limit slowness) completed in 10.6s for a real `limit=10` run, 10 discussions fetched and clustered - well within the required 60s, no hang, no stuck-at-clustering.
+
+### Known Issues / Named Limitations
+- The cooldown is unconditional - it fires on every clustering call regardless of provider (Groq, Gemini, Mock) or whether extraction actually approached a rate limit. Matches the task's own literal design (a flat constant, not a conditional/adaptive one); not tuned further, since this task's boundary didn't ask for that.
+- No corresponding progress-callback event exists for this 3-second gap - `run()`'s `on_progress` stays silent between the "Extract" and "Cluster" stage emissions during this pause, same as it already is for the (much larger, variable-length) num_reports oversample round.
+
+### Important Decisions
+- Chose `_POST_EXTRACTION_DELAY_SECONDS` over the given `POST_EXTRACTION_DELAY` name - purely a naming-convention consistency call (every other tunable delay in this file is `_`-prefixed and `_SECONDS`-suffixed), not a behavioral difference; both files (`pipeline.py`, `conftest.py`) were written together so the exact name was never ambiguous between them.
+- Placed the sleep so it's excluded from both `extract_time` and `cluster_time` - the alternative (folding it into one or the other) would have made those specific, already-relied-upon timing logs quietly stop meaning what their own names say.
+
+### Next Tasks
+- None specifically raised by this task.
+
+### Questions
+None new.
+
+### Lessons Learned
+- The same underlying concern ("clustering might hit a rate limit right after extraction's own burst") produced two different proposed fixes across two consecutive tasks, one correctly rejected (bare sleep inside the AI-call site itself, no way to test-isolate within its own boundary) and one accepted (the same sleep, moved up one layer to the orchestrator, with the test-isolation fixture built in from the start) - the right layer for a "courtesy delay between stages" is the thing that already owns stage boundaries and their own timing/test-isolation conventions, not the AI-call method itself.
+
+---
+
 ## Session — 2026-08-06 (Thread num_reports through the dashboard's "all" run, and two blocking discoveries along the way)
 
 ### Current Objective

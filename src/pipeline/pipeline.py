@@ -63,6 +63,18 @@ ProgressCallback = Callable[[str, str, int], None]
 _FETCH_MAX_ATTEMPTS = 3
 _FETCH_BASE_DELAY_SECONDS = 1.0
 
+# Pause between extraction (a real, measured Groq rate-limit exposure -
+# see SESSION.md's parallel-extraction entries) and clustering's own
+# single batched AI call, so that call doesn't stack immediately behind
+# extraction's own burst before the provider's rate-limit window has
+# had any time to reset. Patched to 0 in tests/conftest.py - patched by
+# name, not via time.sleep itself, since this module does `import time`
+# (not `from time import sleep`), and patching "...pipeline.time.sleep"
+# would patch the one shared time module process-wide rather than just
+# this module's use of it (the exact bug already found and avoided for
+# Extractor.BATCH_DELAY - see conftest.py's own fixture docstring).
+_POST_EXTRACTION_DELAY_SECONDS = 3.0
+
 # Sources with no community/subreddit concept - a keyword is their
 # entire search query (GitHubFetcher's Search Issues call, HNFetcher's
 # Algolia call), and both support num_reports-driven oversampling the
@@ -459,6 +471,11 @@ class Pipeline:
             insights = self._analyze(posts, active_provider, errors, on_progress)
             extract_time = time.time() - extract_start
             logger.info("⏱ Extract: %.1fs", extract_time)
+
+            # Cooldown, not clustering work - deliberately not counted
+            # in cluster_time below (see _POST_EXTRACTION_DELAY_SECONDS's
+            # own comment for why this exists).
+            time.sleep(_POST_EXTRACTION_DELAY_SECONDS)
 
             cluster_start = time.time()
             clusters = self._cluster(insights, active_provider, errors, on_progress)

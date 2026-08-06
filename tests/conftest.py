@@ -27,3 +27,16 @@ def _no_real_batch_delay():
     """
     with patch("src.insights.extractor.Extractor.BATCH_DELAY", 0):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _no_real_post_extraction_delay():
+    """Pipeline.run() sleeps _POST_EXTRACTION_DELAY_SECONDS (3s) between
+    extraction and clustering as a courtesy to AI-provider rate limits
+    (src/pipeline/pipeline.py) - same real-sleep-in-every-test risk as
+    Extractor.BATCH_DELAY above, and the same reason it's patched by
+    name rather than via time.sleep itself (pipeline.py also does
+    `import time`, not `from time import sleep`).
+    """
+    with patch("src.pipeline.pipeline._POST_EXTRACTION_DELAY_SECONDS", 0):
+        yield
