@@ -32,7 +32,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from src.ai import get_ai_provider
 from src.ai.base import AIProvider
@@ -658,6 +658,10 @@ class Pipeline:
         per_source_limit = self._split_limit(query.limit, len(sources))
         per_source_query = replace(query, limit=per_source_limit)
 
+        # [DIAGNOSTIC] temporary - remove after verification.
+        logger.info("[DIAGNOSTIC] Sources: %s", sources)
+        logger.info("[DIAGNOSTIC] Fetch limit per source: %s", per_source_limit)
+
         with ThreadPoolExecutor(max_workers=len(sources)) as executor:
             futures = {
                 executor.submit(self._fetch_from_source, source, app_config, per_source_query, errors): source
@@ -665,11 +669,18 @@ class Pipeline:
             }
 
             all_posts: List[FetchedPost] = []
+            per_source_counts: Dict[str, int] = {}
             for future in futures:
                 source = futures[future]
                 results = future.result()  # _fetch_from_source never raises - see its own docstring
+                per_source_counts[source] = len(results)
                 all_posts = _merge_posts(all_posts, results)
                 logger.info("%s: %d discussion(s) added (%d total after dedup)", source, len(results), len(all_posts))
+
+        # [DIAGNOSTIC] temporary - remove after verification.
+        logger.info("[DIAGNOSTIC] GitHub discussions: %s", per_source_counts.get("github", 0))
+        logger.info("[DIAGNOSTIC] HN discussions: %s", per_source_counts.get("hackernews", 0))
+        logger.info("[DIAGNOSTIC] Total combined: %s", len(all_posts))
 
         logger.info("Total combined: %d discussion(s)", len(all_posts))
         return all_posts
