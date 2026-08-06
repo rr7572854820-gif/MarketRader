@@ -74,6 +74,15 @@ export interface AnalysisProgressProps {
    * the backend's own default.
    */
   subreddit?: string;
+  /** Only meaningful for source="all" (Pipeline.run()'s num_reports-
+   * driven oversample/split-across-sources behavior - see
+   * src/pipeline/pipeline.py). The caller (analysis-form.tsx) decides
+   * when to set this - source==="all" only, per that file's own
+   * "only add num_reports when source==='all'" rule - this component
+   * just forwards whatever it's given, unconditionally, to keep that
+   * one rule in one place.
+   */
+  numReports?: number;
   /** Called once, with a real AnalyzeResponse reconstructed after the
    * stream ends (see this file's module docstring for how and why) -
    * not the "Report" type named in this feature's original spec, which
@@ -95,6 +104,7 @@ export function AnalysisProgress({
   limit,
   useCache,
   subreddit,
+  numReports,
   onComplete,
   onError,
   onUnsupported,
@@ -168,7 +178,9 @@ export function AnalysisProgress({
       return;
     }
 
-    const eventSource = new EventSource(api.streamUrl({ keyword, source, limit, use_cache: useCache, subreddit }));
+    const eventSource = new EventSource(
+      api.streamUrl({ keyword, source, limit, use_cache: useCache, subreddit, num_reports: numReports })
+    );
 
     eventSource.onmessage = (event) => {
       let parsed: { stage: string; message: string; percent: number };

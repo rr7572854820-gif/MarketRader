@@ -138,6 +138,7 @@ async def analyze_stream(
     limit: int = Query(default=25, ge=1, le=100),
     use_cache: bool = Query(default=True),
     subreddit: str = Query(default="all"),
+    num_reports: Optional[int] = Query(default=None, ge=1, le=100),
 ) -> StreamingResponse:
     """Server-Sent Events variant of POST /analyze: streams
     Pipeline.run()'s on_progress callback live (see
@@ -165,7 +166,14 @@ async def analyze_stream(
     variant exists, since one wasn't requested.
     """
     try:
-        request = AnalyzeRequest(keyword=keyword, source=source, limit=limit, use_cache=use_cache, subreddit=subreddit)
+        request = AnalyzeRequest(
+            keyword=keyword,
+            source=source,
+            limit=limit,
+            use_cache=use_cache,
+            subreddit=subreddit,
+            num_reports=num_reports,
+        )
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -173,6 +181,7 @@ async def analyze_stream(
         subreddit=request.subreddit,
         keyword=request.keyword,
         post_limit=request.limit,
+        num_reports=request.num_reports,
         output_dir=_OUTPUT_DIR,
         ai_provider="auto",
         report_format=request.report_format,

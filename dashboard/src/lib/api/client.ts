@@ -25,12 +25,18 @@ import type {
 } from "@/lib/api/types";
 
 /** Query params GET /analyze/stream accepts - a curated subset of
- * AnalyzeRequest's fields (no num_reports/report_format), matching
- * exactly what the backend endpoint itself takes as query parameters
- * (see src/api/routes.py::analyze_stream). subreddit is included even
+ * AnalyzeRequest's fields (no report_format - the stream never returns
+ * a report body, see analyze_stream's own docstring), matching exactly
+ * what the backend endpoint itself takes as query parameters (see
+ * src/api/routes.py::analyze_stream). subreddit is included even
  * though it wasn't in this feature's original prop list - source="reddit"
  * needs it to target the right subreddit; dropping it would silently
- * ignore the user's actual choice.
+ * ignore the user's actual choice. num_reports was added alongside
+ * source="all" oversampling - without it, source="all" (which always
+ * streams, never goes through api.analyze()'s POST /analyze path -
+ * see analysis-form.tsx's hasNoMockEquivalent()) had no way to trigger
+ * Pipeline.run()'s num_reports-driven oversample/split-across-sources
+ * behavior at all.
  */
 export interface AnalyzeStreamParams {
   keyword?: string | null;
@@ -38,6 +44,7 @@ export interface AnalyzeStreamParams {
   limit: number;
   use_cache: boolean;
   subreddit?: string;
+  num_reports?: number;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -122,6 +129,7 @@ export const api = {
     url.searchParams.set("limit", String(params.limit));
     url.searchParams.set("use_cache", String(params.use_cache));
     if (params.subreddit) url.searchParams.set("subreddit", params.subreddit);
+    if (params.num_reports) url.searchParams.set("num_reports", String(params.num_reports));
     return url.toString();
   },
 };

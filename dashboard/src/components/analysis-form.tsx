@@ -41,6 +41,28 @@ function hasNoMockEquivalent(source: Source): boolean {
   return source !== "reddit";
 }
 
+/** The `limit` value actually sent to the backend as post_limit (the
+ * hard fetch ceiling) - distinct from what the user typed into the
+ * "Post limit" field whenever source="all", where that typed number is
+ * instead sent as num_reports (the real target - see buildPayload()).
+ *
+ * Real, live-verified reason this can't just be the same number twice:
+ * Pipeline._initial_fetch_limit() computes
+ * min(calculate_fetch_limit(num_reports), post_limit) - calculate_fetch_limit()
+ * always returns *more* than its input (1.1x-3x), so if post_limit ==
+ * num_reports, min() always just returns post_limit unchanged and the
+ * oversample multiplier can never take effect, for any input value.
+ * Confirmed against a real local server: limit=10 & num_reports=10
+ * still produced "Fetch limit per source: 5", not 15. Sending MAX_LIMIT
+ * (the API's own existing, already-validated ceiling) here instead
+ * gives calculate_fetch_limit(num_reports) real headroom to work,
+ * still bounded only by the backend's own existing, tested caps - no
+ * duplicated oversample-formula logic on this side.
+ */
+function effectiveFetchLimit(source: Source, limitValue: number): number {
+  return source === "all" ? MAX_LIMIT : limitValue;
+}
+
 function validate(source: Source, subreddit: string, keyword: string, limitRaw: string): FieldErrors {
   const errors: FieldErrors = {};
   if (source === "reddit") {
@@ -102,11 +124,24 @@ export function AnalysisForm() {
   const [error, setError] = React.useState<unknown>(null);
 
   function buildPayload(): AnalyzeRequest {
+    // num_reports drives Pipeline.run()'s oversample-and-split-across-
+    // sources behavior (src/pipeline/pipeline.py) - only meaningful,
+    // and only ever set, for source="all". Set to the user's typed
+    // limit (the real target report count) - the `limit` field sent
+    // below is deliberately NOT the same number for source="all" (see
+    // effectiveFetchLimit's own docstring for why that would silently
+    // disable oversampling entirely). This covers the POST /analyze
+    // fallback path only (mock-unsupported/SSE-lost) - the primary
+    // streaming path sets both separately, via AnalysisProgress's own
+    // limit/numReports props below.
+    const numReports = source === "all" ? Number(limit) : undefined;
+
     return hasNoMockEquivalent(source)
       ? {
           source,
           keyword: keyword.trim(),
-          limit: Number(limit),
+          limit: effectiveFetchLimit(source, Number(limit)),
+          num_reports: numReports,
           use_cache: useCache,
           report_format: "both",
         }
@@ -339,9 +374,10 @@ export function AnalysisForm() {
         <AnalysisProgress
           keyword={keyword.trim()}
           source={source}
-          limit={Number(limit)}
+          limit={effectiveFetchLimit(source, Number(limit))}
           useCache={useCache}
           subreddit={subreddit.trim()}
+          numReports={source === "all" ? Number(limit) : undefined}
           onComplete={handleAnalysisComplete}
           onError={(message) => {
             // A lost/failed SSE connection falls back to the existing,

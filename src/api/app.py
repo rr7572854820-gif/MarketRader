@@ -50,6 +50,24 @@ from fastapi.responses import JSONResponse
 
 from src.api.routes import router
 
+# Logging (previously missing entirely here - found live: running via
+# `uvicorn src.api.app:app`, every logger.info() call anywhere in the
+# app, including Pipeline.run()'s own fetch/extract/cluster progress
+# logs, was silently invisible. Python's root logger has no handler by
+# default; uvicorn only configures handlers for its own "uvicorn"/
+# "uvicorn.access"/"uvicorn.error" loggers, not the root logger or this
+# project's "src.*" tree, so anything below WARNING fell through to
+# logging.lastResort (which only prints WARNING+) with no INFO output
+# at all. Same fix src/pipeline/runner.py's own _configure_logging()
+# already applies for the CLI (see that function's docstring for the
+# same google-genai-log-pollution reasoning) - root stays at WARNING so
+# third-party libraries stay quiet, "src" is raised to INFO so this
+# project's own log lines (the ones an operator actually wants to see
+# in Render's log viewer) show up. No --verbose equivalent here (no CLI
+# args in an ASGI process) - always INFO, matching runner.py's default.
+logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s", force=True)
+logging.getLogger("src").setLevel(logging.INFO)
+
 app = FastAPI(
     title="MarketRadar API",
     description=(

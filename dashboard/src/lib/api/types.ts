@@ -26,6 +26,7 @@ export interface AnalyzeRequest {
   subreddit?: string;
   source?: Source;
   limit: number;
+  num_reports?: number;
   use_cache: boolean;
   report_format: ReportFormat;
 }
