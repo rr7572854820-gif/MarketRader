@@ -100,6 +100,20 @@ _MULTI_SOURCE_EXPANSION = ("github", "hackernews")
 # "Github"/"Hackernews", not "GitHub"/"Hacker News".
 _SOURCE_DISPLAY_NAMES = {"github": "GitHub", "hackernews": "Hacker News", "hn": "Hacker News"}
 
+# Hard ceiling on the combined discussion count _fetch_all_sources()
+# ever targets across every source, regardless of how high a caller's
+# own query.limit is (the dashboard sends up to MAX_LIMIT=100 as
+# post_limit for source="all" - see analysis-form.tsx's
+# effectiveFetchLimit(), added specifically to give calculate_fetch_limit()
+# oversampling room). Extraction (Extractor.BATCH_SIZE=2, BATCH_DELAY=1.5s)
+# runs sequentially per post - the more discussions fetched, the longer
+# that burst runs and the more likely it exhausts Groq's free-tier rate
+# limit before the fixed 3s post-extraction cooldown
+# (_POST_EXTRACTION_DELAY_SECONDS) has any real chance to let it reset,
+# which then makes clustering's own AI call fail too. 25 keeps that
+# burst short enough in practice that the cooldown is usually enough.
+_MAX_TOTAL_ALL_SOURCES = 25
+
 # GitHub/Hacker News-only report-count reliability (PipelineConfig.num_reports):
 # calculate_fetch_limit() decides how many discussions to request on
 # the first fetch for a given number of requested reports. Not every
@@ -669,10 +683,15 @@ class Pipeline:
         Each source's own FetchQuery.limit is query.limit split evenly
         across `sources` (_split_limit) - the combined result still
         targets roughly query.limit discussions overall, not
-        query.limit from every source independently.
+        query.limit from every source independently. query.limit is
+        itself first capped at _MAX_TOTAL_ALL_SOURCES (25) - see that
+        constant's own comment for why a large combined target risks
+        exhausting Groq's rate limit during the extraction burst that
+        follows, before clustering's own AI call ever gets to run.
         """
         logger.info("Fetching from %d source(s) simultaneously: %s", len(sources), sources)
-        per_source_limit = self._split_limit(query.limit, len(sources))
+        capped_total = min(query.limit, _MAX_TOTAL_ALL_SOURCES)
+        per_source_limit = self._split_limit(capped_total, len(sources))
         per_source_query = replace(query, limit=per_source_limit)
 
         # [DIAGNOSTIC] temporary - remove after verification.

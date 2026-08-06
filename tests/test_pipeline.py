@@ -772,12 +772,16 @@ def test_oversample_split_between_sources(tmp_path: Path, monkeypatch):
     combined fetch target evenly across the two active sources, not
     request the full target from each independently. calculate_fetch_limit(10)
     is 30 (3x multiplier for a small request, see calculate_fetch_limit's
-    own docstring) - split across 2 sources, each FetchQuery.limit is 15,
-    so the two sources' results sum back to the original 30-discussion
-    combined target.
+    own docstring) - but _fetch_all_sources() caps the combined target at
+    _MAX_TOTAL_ALL_SOURCES (25, added to bound the extraction burst that
+    follows and avoid exhausting Groq's rate limit before clustering's
+    own AI call runs - see that constant's own comment) before splitting,
+    so each source's FetchQuery.limit is 12 (25 // 2, _split_limit's own
+    floor division), not 15 - the two sources' results sum back to 24,
+    not the full uncapped 30.
 
-    post_limit is deliberately set equal to that same 30 (not left at a
-    generous default) so _should_oversample's own "still has headroom
+    post_limit is deliberately set equal to the uncapped 30 (not left at
+    a generous default) so _should_oversample's own "still has headroom
     under post_limit" check is false regardless of how few clusters this
     test's minimal stub data produces - this isolates the *initial*
     fetch's split from the separate (and separately-covered, by
@@ -800,7 +804,7 @@ def test_oversample_split_between_sources(tmp_path: Path, monkeypatch):
     )
     Pipeline(config).run()
 
-    assert limits_seen == [15, 15]
+    assert limits_seen == [12, 12]
 
 
 def test_combined_discussions_deduplicated(tmp_path: Path, monkeypatch):
