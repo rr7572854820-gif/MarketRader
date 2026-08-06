@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from dotenv import load_dotenv
 
@@ -66,6 +66,17 @@ class Config:
     # Same defaulting rule as github_token, for the same reason - Groq
     # was added after existing Config(...) call sites too.
     groq_api_key: Optional[str] = None
+    # Optional key rotation (GroqProvider, src/ai/groq_provider.py):
+    # up to 3 additional keys it can rotate through on a 429/401 from
+    # the currently-active one. Same defaulting rule as groq_api_key -
+    # every existing Config(...) call site keeps working unchanged.
+    # Numbered keys take priority over the single legacy groq_api_key
+    # when both are set (see groq_api_keys/GroqProvider.__init__) -
+    # groq_api_key remains a fully-supported single-key fallback, not
+    # deprecated.
+    groq_api_key_1: Optional[str] = None
+    groq_api_key_2: Optional[str] = None
+    groq_api_key_3: Optional[str] = None
 
     @property
     def reddit_configured(self) -> bool:
@@ -78,9 +89,26 @@ class Config:
         return bool(self.gemini_api_key)
 
     @property
+    def groq_api_keys(self) -> List[str]:
+        """Every configured numbered Groq key (GROQ_API_KEY_1/2/3), in
+        order, skipping any that are unset - does NOT include the
+        single legacy groq_api_key (GroqProvider.__init__ falls back to
+        that itself only when this list is empty, so this property
+        alone answers "how many rotation-eligible keys are there").
+        """
+        return [key for key in (self.groq_api_key_1, self.groq_api_key_2, self.groq_api_key_3) if key]
+
+    @property
     def groq_configured(self) -> bool:
-        """True only when a Groq API key is present."""
-        return bool(self.groq_api_key)
+        """True when a Groq API key is present via either scheme - the
+        single legacy groq_api_key, or at least one numbered key. Must
+        check both: get_ai_provider() (src/ai/__init__.py) only ever
+        constructs GroqProvider when this is True, so missing the
+        numbered-keys case here would make key rotation unreachable for
+        anyone using only GROQ_API_KEY_1/2/3 with no legacy GROQ_API_KEY
+        set - the exact "recommended" setup this feature exists for.
+        """
+        return bool(self.groq_api_key or self.groq_api_keys)
 
 
 def load_config(dotenv_path: Optional[Path] = None) -> Config:
@@ -108,4 +136,7 @@ def load_config(dotenv_path: Optional[Path] = None) -> Config:
         reddit_user_agent=_env_str("REDDIT_USER_AGENT") or MOCK_USER_AGENT,
         github_token=_env_str("GITHUB_TOKEN"),
         groq_api_key=_env_str("GROQ_API_KEY"),
+        groq_api_key_1=_env_str("GROQ_API_KEY_1"),
+        groq_api_key_2=_env_str("GROQ_API_KEY_2"),
+        groq_api_key_3=_env_str("GROQ_API_KEY_3"),
     )

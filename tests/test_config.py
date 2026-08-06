@@ -17,7 +17,17 @@ import pytest
 
 from src.config import DEFAULT_GEMINI_MODEL, MOCK_USER_AGENT, load_config
 
-_ENV_KEYS = ["GEMINI_API_KEY", "GEMINI_MODEL", "REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET", "REDDIT_USER_AGENT"]
+_ENV_KEYS = [
+    "GEMINI_API_KEY",
+    "GEMINI_MODEL",
+    "REDDIT_CLIENT_ID",
+    "REDDIT_CLIENT_SECRET",
+    "REDDIT_USER_AGENT",
+    "GROQ_API_KEY",
+    "GROQ_API_KEY_1",
+    "GROQ_API_KEY_2",
+    "GROQ_API_KEY_3",
+]
 
 
 @pytest.fixture(autouse=True)
@@ -96,6 +106,37 @@ def test_missing_dotenv_file_does_not_raise(tmp_path: Path):
     config = load_config(dotenv_path=tmp_path / "does_not_exist.env")
     assert config.gemini_configured is False
     assert config.reddit_configured is False
+
+
+def test_config_loads_multiple_groq_keys(tmp_path: Path):
+    """3 numbered keys configured - groq_api_keys must return all 3, in
+    order, and groq_configured must be True purely from the numbered
+    keys (no legacy GROQ_API_KEY set at all).
+    """
+    dotenv_file = tmp_path / ".env"
+    dotenv_file.write_text(
+        "GROQ_API_KEY_1=key-one\nGROQ_API_KEY_2=key-two\nGROQ_API_KEY_3=key-three\n", encoding="utf-8"
+    )
+
+    config = load_config(dotenv_path=dotenv_file)
+
+    assert config.groq_api_keys == ["key-one", "key-two", "key-three"]
+    assert config.groq_configured is True
+    assert config.groq_api_key is None  # legacy field genuinely unset
+
+
+def test_groq_configured_true_from_legacy_single_key_alone(tmp_path: Path):
+    """Backward compatible: only the old GROQ_API_KEY set, no numbered
+    keys - groq_configured must still be True, groq_api_keys empty.
+    """
+    dotenv_file = tmp_path / ".env"
+    dotenv_file.write_text("GROQ_API_KEY=only-key\n", encoding="utf-8")
+
+    config = load_config(dotenv_path=dotenv_file)
+
+    assert config.groq_api_key == "only-key"
+    assert config.groq_api_keys == []
+    assert config.groq_configured is True
 
 
 def test_config_loading_is_independent_of_current_working_directory(tmp_path: Path, monkeypatch):
