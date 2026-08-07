@@ -72,10 +72,22 @@ class FetchQuery:
             currently only GitHubFetcher does. None/empty means "use
             keyword alone" - every existing call site that never sets
             this keeps working unchanged.
+        original_keyword: The user's actual, pre-expansion input,
+            distinct from `keyword` whenever QueryExpander has run (see
+            src/pipeline/pipeline.py's run()) - `keyword`/`keywords` may
+            be AI-expanded, technical-sounding search terms meant for
+            GitHub's Search Issues API specifically; a fetcher whose own
+            search works better on short, broad, conceptual terms (e.g.
+            HNFetcher, against Algolia) should prefer this over
+            `keyword` when set. None means no expansion happened -
+            `keyword` is already the user's original input, and every
+            existing call site that never sets this keeps working
+            unchanged.
         limit: Maximum number of posts to return.
     """
 
     community: str
     keyword: Optional[str] = None
     keywords: Optional[List[str]] = None
+    original_keyword: Optional[str] = None
     limit: int = 25

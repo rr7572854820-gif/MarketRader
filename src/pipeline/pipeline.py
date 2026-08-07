@@ -459,7 +459,13 @@ class Pipeline:
                         self._config.num_reports,
                         _FETCH_LIMIT_HARD_CAP,
                     )
-            query = FetchQuery(community=community, keyword=search_keyword, keywords=expanded_terms, limit=initial_limit)
+            query = FetchQuery(
+                community=community,
+                keyword=search_keyword,
+                keywords=expanded_terms,
+                original_keyword=self._config.keyword,
+                limit=initial_limit,
+            )
 
             fetcher: Optional[Fetcher] = None
             if is_multi_source:
@@ -770,7 +776,11 @@ class Pipeline:
             self._config.post_limit,
         )
         query = FetchQuery(
-            community=community, keyword=search_keyword, keywords=expanded_terms, limit=self._config.post_limit
+            community=community,
+            keyword=search_keyword,
+            keywords=expanded_terms,
+            original_keyword=self._config.keyword,
+            limit=self._config.post_limit,
         )
         more_posts = self._fetch(fetcher, query, errors)
         merged_posts = _merge_posts(posts, more_posts)
@@ -817,7 +827,11 @@ class Pipeline:
             self._config.post_limit,
         )
         query = FetchQuery(
-            community=community, keyword=search_keyword, keywords=expanded_terms, limit=self._config.post_limit
+            community=community,
+            keyword=search_keyword,
+            keywords=expanded_terms,
+            original_keyword=self._config.keyword,
+            limit=self._config.post_limit,
         )
         more_posts = self._fetch_all_sources(app_config, active_sources, query, errors)
         merged_posts = _merge_posts(posts, more_posts)

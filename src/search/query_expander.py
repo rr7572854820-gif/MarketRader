@@ -27,7 +27,14 @@ from src.ai.base import AIProvider, AIProviderError
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MAX_TERMS = 4
+# Lowered from 4 - requested to reduce over-aggressive clustering
+# (fewer terms -> fewer, more-overlapping GitHub issues fetched ->
+# less for Aggregator's AI clustering step to over-merge). Implemented
+# as asked; the causal chain from "fewer search terms" to "more final
+# clusters" wasn't independently verified here (if anything, fewer
+# terms means a *smaller* unioned search result, not obviously a more
+# diverse one - see SESSION.md) - flagged, not silently endorsed.
+_DEFAULT_MAX_TERMS = 3
 
 
 def _build_expansion_prompt(user_input: str, max_terms: int) -> str:

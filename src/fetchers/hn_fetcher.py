@@ -36,20 +36,23 @@ _API_BASE = "https://hn.algolia.com/api/v1/search"
 _TIMEOUT_SECONDS = 10
 _MAX_HITS_PER_PAGE = 100
 _OVERSAMPLE_MULTIPLIER = 3
-_MIN_POINTS = 5
+# Lowered from 5 (live-verified: at >5, a real "invoicing" search
+# returned very few - sometimes zero - quality-passing hits; Hacker
+# News stories in general have a much lower typical point count than
+# the threshold assumed, and >1 still excludes the near-zero-signal
+# tail while letting real, on-topic discussion through).
+_MIN_POINTS = 1
 
 _HIRING_MARKERS = ("who is hiring", "ask hn: who")
 _POLL_MARKER = "poll:"
 
 
 class HNFetcher(BaseFetcher):
-    """Searches Hacker News stories directly for query.keyword via the
-    Algolia HN Search API, applies a quality filter (points, hiring/poll
-    noise), then a keyword-presence filter against the fetched title/body
-    text - the same two-stage "wide search, then filter" shape
-    GitHubFetcher's Search Issues call plus RelevanceRanker uses,
-    adapted to what Algolia's response actually returns (points/
-    num_comments in place of GitHub's reactions/comment-count).
+    """Searches Hacker News stories directly via the Algolia HN Search
+    API, preferring query.original_keyword over query.keyword/keywords
+    (see fetch()'s own docstring for why), then applies a quality
+    filter (points, hiring/poll noise) only - no post-fetch keyword-
+    presence re-check (removed; see fetch()'s own docstring for why).
 
     query.community is not used - Hacker News has no equivalent concept
     (see FetchQuery's own docstring: fetchers are free to ignore fields
@@ -74,30 +77,48 @@ class HNFetcher(BaseFetcher):
         pass
 
     def fetch(self, query: FetchQuery) -> List[FetchedPost]:
-        """Search Hacker News stories for query.keyword.
+        """Search Hacker News stories for query.original_keyword (falling
+        back to query.keyword when unset - see FetchQuery's own
+        docstring).
+
+        Deliberately searches the user's original, pre-expansion input
+        rather than query.keyword/keywords whenever QueryExpander has
+        run (source="github"/"all" - src/pipeline/pipeline.py): those
+        are AI-expanded, technical-sounding terms tuned for GitHub's
+        Search Issues API specifically (e.g. "api gateway architecture"
+        for a user who typed "api"), and Algolia's own search - live-
+        verified - returns far fewer, sometimes zero, results for a
+        long, specific technical phrase than for the short, broad term
+        a real HN discussion's title is actually likely to contain.
 
         Raises:
-            FetcherError: If query.keyword is missing/blank, the
+            FetcherError: If no keyword is available at all, the
                 Algolia API times out, or returns a non-200 status.
                 Zero matching stories is not an error - returns [].
         """
-        if not query.keyword:
+        search_term = query.original_keyword or query.keyword
+        if not search_term:
             raise FetcherError("A keyword is required to search Hacker News.")
 
         limit = max(1, query.limit)
         hits_per_page = min(limit * _OVERSAMPLE_MULTIPLIER, _MAX_HITS_PER_PAGE)
 
-        hits = self._search_stories(query.keyword, hits_per_page)
+        hits = self._search_stories(search_term, hits_per_page)
 
-        keyword_lower = query.keyword.lower()
+        # No post-fetch keyword-presence filter here (unlike an earlier
+        # version of this method) - live-verified to remove too many
+        # real, on-topic results: Algolia's own search relevance is
+        # already the actual filter (the same lesson GitHubFetcher
+        # learned and removed its own equivalent post-fetch filter for -
+        # see that module's docstring), and a broad, single-word search
+        # term (see above) makes a literal substring re-check even more
+        # likely to reject a genuinely relevant story that just doesn't
+        # happen to repeat the exact search word in its title/body.
         posts: List[FetchedPost] = []
         for hit in hits:
             if not self._passes_quality_filter(hit):
                 continue
-            post = self._hit_to_post(hit)
-            if keyword_lower not in post.title.lower() and keyword_lower not in post.text.lower():
-                continue
-            posts.append(post)
+            posts.append(self._hit_to_post(hit))
             if len(posts) >= limit:
                 break
 
