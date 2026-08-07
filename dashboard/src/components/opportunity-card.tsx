@@ -20,6 +20,43 @@ const ACTION_ACCENT: Record<ConfidenceLevel, string> = {
   Weak: "border-l-red-500",
 };
 
+// frequency counts how many independent discussions this opportunity
+// was found in - a distinct signal from `confidence` (which reflects
+// how directly a single discussion's evidence was stated). A
+// frequency=1 opportunity can still have Strong confidence, but it's
+// still only one data point - this tier exists to make that visible
+// rather than letting a single anecdote read the same as a corroborated
+// pattern. See reports/[reportId]/page.tsx for the matching list-order
+// sort (a single card can't reorder itself relative to its siblings).
+export type SignalTier = "weak" | "normal" | "validated";
+
+export function signalTierOf(frequency: number): SignalTier {
+  if (frequency === 1) return "weak";
+  if (frequency >= 3) return "validated";
+  return "normal";
+}
+
+function SignalBadge({ tier }: { tier: SignalTier }) {
+  if (tier === "weak") {
+    return (
+      <Badge variant="outline" className="border-border bg-muted font-normal text-muted-foreground">
+        Weak signal
+      </Badge>
+    );
+  }
+  if (tier === "validated") {
+    return (
+      <Badge
+        variant="outline"
+        className="border-emerald-600/30 bg-emerald-50 font-normal text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-400"
+      >
+        Validated signal
+      </Badge>
+    );
+  }
+  return null;
+}
+
 type DiscussionSource = "github" | "hackernews" | "other";
 
 function sourceOf(url: string): DiscussionSource {
@@ -110,15 +147,24 @@ export function OpportunityCard({ opportunity, rank }: { opportunity: Opportunit
     ? `${Math.round(opportunity.verification_rate * 100)}% verified`
     : "No verification data";
   const sources = deriveSources(opportunity.representative_discussions);
+  const signalTier = signalTierOf(opportunity.frequency);
 
   return (
-    <Card className="gap-4 rounded-xl py-6">
+    <Card className={cn("gap-4 rounded-xl py-6", signalTier === "weak" && "opacity-60")}>
       <CardHeader className="gap-2">
         <div className="flex items-start justify-between gap-2">
           {rank ? <span className="text-sm font-medium text-muted-foreground">#{rank}</span> : <span />}
-          <ConfidenceBadge confidence={opportunity.confidence} />
+          <div className="flex items-center gap-1.5">
+            <SignalBadge tier={signalTier} />
+            <ConfidenceBadge confidence={opportunity.confidence} />
+          </div>
         </div>
         <CardTitle className="line-clamp-2 text-base font-medium">{opportunity.title}</CardTitle>
+        {signalTier === "weak" ? (
+          <p className="text-xs text-muted-foreground">
+            Only 1 mention found — monitor for recurrence before acting.
+          </p>
+        ) : null}
         <div className="flex flex-wrap gap-1.5 pt-1 text-xs">
           <Badge variant="outline" className="gap-1 font-normal">
             Opportunity: {opportunity.opportunity_score}/100

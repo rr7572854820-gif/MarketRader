@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ErrorState } from "@/components/error-state";
-import { OpportunityCard } from "@/components/opportunity-card";
+import { OpportunityCard, signalTierOf, type SignalTier } from "@/components/opportunity-card";
 import { ReportDetailSkeleton } from "@/components/skeletons/report-detail-skeleton";
 import { TopPainPointsChart } from "@/components/charts/top-pain-points-chart";
 import { OpportunityScoresChart } from "@/components/charts/opportunity-scores-chart";
@@ -27,6 +27,22 @@ function formatTimestamp(iso: string): string {
   } catch {
     return iso;
   }
+}
+
+// Validated (frequency >= 3) first, weak (frequency === 1) last - see
+// opportunity-card.tsx's own signalTierOf/SignalBadge for why this
+// exists (a single anecdote shouldn't visually compete with a
+// corroborated pattern) and why this sort can't live inside
+// OpportunityCard itself (a single card has no visibility into its
+// siblings). Array.prototype.sort is stable (ES2019+), so opportunities
+// within the same tier keep their original relative order rather than
+// being silently reshuffled.
+const TIER_ORDER: Record<SignalTier, number> = { validated: 0, normal: 1, weak: 2 };
+
+function sortByFrequencyTier(opportunities: OpportunityEntry[]): OpportunityEntry[] {
+  return [...opportunities].sort(
+    (a, b) => TIER_ORDER[signalTierOf(a.frequency)] - TIER_ORDER[signalTierOf(b.frequency)]
+  );
 }
 
 export default function ReportDetailPage() {
@@ -206,7 +222,7 @@ export default function ReportDetailPage() {
           </p>
         ) : (
           <div className="grid gap-4 lg:grid-cols-2">
-            {opportunities.map((opportunity, i) => (
+            {sortByFrequencyTier(opportunities).map((opportunity, i) => (
               <OpportunityCard key={`${opportunity.title}-${i}`} opportunity={opportunity} rank={i + 1} />
             ))}
           </div>

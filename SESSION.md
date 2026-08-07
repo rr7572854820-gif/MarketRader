@@ -47,6 +47,33 @@ Ideas worth considering later, explicitly not committed to now.
 
 ## Session Log
 
+## Session — 2026-08-07 (Visually demote frequency=1 opportunities)
+
+### Current Objective
+Make single-mention (`frequency === 1`) opportunities visually read as weak signals on the Report Details page - dimmed, badged, with a short warning - without removing them, and demote them to the bottom of the list; `frequency >= 3` gets a "Validated signal" badge and moves to the top.
+
+### Completed Work
+- Read the required files first. Found a real structural conflict before writing code: "move to bottom of list" / "show at top of list" cannot be implemented from inside `OpportunityCard` - a single card component has no visibility into its siblings, so it can't reorder itself relative to them. That has to happen where the list is built (`reports/[reportId]/page.tsx`), which sits outside the stated "opportunity card component only" boundary, though still pure frontend UI, not backend/pipeline. Confirmed via `AskUserQuestion` before touching that file - resolved to add the minimum needed (a sort call before `.map()`), not a broader rewrite.
+- `opportunity-card.tsx`: added `signalTierOf(frequency)` (`weak` / `normal` / `validated`, exported so the list-sort in the page component can't drift out of sync with the badge logic) and `SignalBadge` (gray "Weak signal" for `frequency === 1`, soft green "Validated signal" for `frequency >= 3`, nothing for `frequency === 2`). Card gets `opacity-60` only in the weak tier; a warning line ("Only 1 mention found — monitor for recurrence before acting.") renders below the title only in the weak tier.
+- `reports/[reportId]/page.tsx`: new `sortByFrequencyTier()` sorts opportunities by tier (validated → normal → weak) using the same exported `signalTierOf`, applied only to the array passed into the card `.map()` - deliberately left the charts and the "Opportunities (N)" count using the original, unsorted `opportunities` array, since re-ordering those wasn't requested and could look like an unrelated change to chart data. `Array.prototype.sort` is stable (ES2019+), so same-tier opportunities keep their original relative order rather than being reshuffled.
+- `npx tsc --noEmit` / `npx eslint .` both clean.
+
+### Verification
+- No saved report in this project currently has a `frequency >= 3` opportunity alongside 1s/2s (checked all of `output/*.md`: 102 opportunities at frequency=1, 6 at frequency=2, only 3 at frequency=3, none co-occurring in the same report) - so the "validated" tier and full three-tier sort couldn't be checked against one single real report end-to-end.
+- Verified the sort **algorithm itself** (not just read, actually executed) against real frequency sequences pulled from two real saved reports: `report_20260805_135150` (`[1,2,1] -> [2,1,1]`, confirms the freq=2 item moves ahead of both freq=1 items and their relative order is preserved) and `report_20260806_154527` (`[2,2,1,1,1]`, already correctly ordered, stable sort left it unchanged). Also ran a synthetic case covering all three tiers together (no real report provides one): `[1,5,2,1,3] -> [5,3,2,1,1]` with correct tier labels (`validated, validated, normal, weak, weak`) - validated first, normal middle, weak last, stable within each tier.
+- Started the real backend (`uvicorn`) and real dev server; loaded both real mixed-frequency reports over real HTTP - 200, zero compile/server errors.
+- Could not visually confirm the rendered badges/opacity/order in an actual browser - `ReportDetailPage` is a client-fetched component, so the client-rendered opportunity list is invisible to a `curl`-based check (same limitation as the two prior UI tasks this session), and no chromium-cli/Playwright is available in this environment (confirmed by checking, not assumed).
+
+### Known Issues
+- The "validated signal" (frequency >= 3) tier and the full three-tier sort are verified by algorithm execution against real + synthetic data and by code review, not by an actual real report containing a frequency >= 3 opportunity. Worth a real end-to-end check once a run produces one.
+- Full visual/browser verification (does it actually read as "dimmed," is the badge legible, does the reorder look right at a glance) is not possible in this environment - same disclosed limitation as the landing page and premium-redesign tasks.
+
+### Important Decisions
+- Extended the boundary from "opportunity card component only" to also include a minimal sort call in `reports/[reportId]/page.tsx`, confirmed via `AskUserQuestion` - the alternative (styling only, no reordering) would have left the task's own stated requirement unmet.
+- Exported `signalTierOf`/`SignalTier` from `opportunity-card.tsx` rather than duplicating the frequency-threshold logic in the page component - keeps the badge and the sort order structurally unable to disagree if the thresholds ever change.
+
+---
+
 ## Session — 2026-08-07 (Dramatically improve query expansion - `QueryExpander`)
 
 ### Current Objective
