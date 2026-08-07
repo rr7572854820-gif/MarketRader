@@ -1,251 +1,359 @@
-import { Info } from "lucide-react";
+import * as React from "react";
 
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { ConfidenceBadge } from "@/components/confidence-badge";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
-import type { ConfidenceLevel, OpportunityEntry } from "@/lib/api/types";
+import type { OpportunityEntry } from "@/lib/api/types";
 
-const SPECULATIVE_TOOLTIP =
-  "AI-inferred from discussion patterns, not a verified finding - treat as a starting hypothesis, not a fact.";
+// ---------------------------------------------------------------------------
+// Signal strength (replaces the old opportunity_score/ConfidenceBadge system
+// entirely, per this task's explicit removal list). Computed from two real,
+// already-available fields - frequency (independent mentions) and
+// verification_rate (independent, zero-AI re-check, see
+// src/verification/verifier.py) - never from opportunity_score, which is
+// AI-inferred and no longer surfaced on this card at all.
+// ---------------------------------------------------------------------------
 
-// Confidence drives the recommended-action accent color, independent of
-// the (unrelated) opportunity_score number - see confidence-badge.tsx
-// for why confidence reflects how directly the evidence was stated, not
-// how large the opportunity looks.
-const ACTION_ACCENT: Record<ConfidenceLevel, string> = {
-  Strong: "border-l-emerald-500",
-  Moderate: "border-l-amber-500",
-  Weak: "border-l-red-500",
+type SignalTier = "strong" | "moderate" | "weak";
+
+interface Signal {
+  filled: number; // out of 5
+  tier: SignalTier;
+  label: string;
+}
+
+function computeSignal(frequency: number, verificationRate: number): Signal {
+  if (frequency >= 5 && verificationRate >= 0.65) return { filled: 5, tier: "strong", label: "Strong signal" };
+  if (frequency >= 3 && verificationRate >= 0.55) return { filled: 4, tier: "strong", label: "Strong signal" };
+  if (frequency >= 2 && verificationRate >= 0.5) return { filled: 3, tier: "moderate", label: "Moderate signal" };
+  if (frequency >= 1 && verificationRate >= 0.4) return { filled: 2, tier: "moderate", label: "Moderate signal" };
+  return { filled: 1, tier: "weak", label: "Early signal" };
+}
+
+// Soft/token-based rather than the given literal hex - this card (unlike
+// the landing page) sits under the app's real, working light/dark toggle,
+// same resolution already recorded for the two prior opportunity-card
+// redesigns this session (see SESSION.md).
+const TIER_TEXT: Record<SignalTier, string> = {
+  strong: "text-emerald-700 dark:text-emerald-400",
+  moderate: "text-amber-700 dark:text-amber-400",
+  weak: "text-muted-foreground",
+};
+const TIER_DOT: Record<SignalTier, string> = {
+  strong: "bg-emerald-600 dark:bg-emerald-500",
+  moderate: "bg-amber-600 dark:bg-amber-500",
+  weak: "bg-muted-foreground/60",
+};
+const TIER_BORDER: Record<SignalTier, string> = {
+  strong: "border-l-emerald-600/50 dark:border-l-emerald-700",
+  moderate: "border-l-border",
+  weak: "border-l-border",
 };
 
-// frequency counts how many independent discussions this opportunity
-// was found in - a distinct signal from `confidence` (which reflects
-// how directly a single discussion's evidence was stated). A
-// frequency=1 opportunity can still have Strong confidence, but it's
-// still only one data point - this tier exists to make that visible
-// rather than letting a single anecdote read the same as a corroborated
-// pattern. See reports/[reportId]/page.tsx for the matching list-order
-// sort (a single card can't reorder itself relative to its siblings).
-export type SignalTier = "weak" | "normal" | "validated";
-
-export function signalTierOf(frequency: number): SignalTier {
-  if (frequency === 1) return "weak";
-  if (frequency >= 3) return "validated";
-  return "normal";
-}
-
-function SignalBadge({ tier }: { tier: SignalTier }) {
-  if (tier === "weak") {
-    return (
-      <Badge variant="outline" className="border-border bg-muted font-normal text-muted-foreground">
-        Weak signal
-      </Badge>
-    );
-  }
-  if (tier === "validated") {
-    return (
-      <Badge
-        variant="outline"
-        className="border-emerald-600/30 bg-emerald-50 font-normal text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-400"
-      >
-        Validated signal
-      </Badge>
-    );
-  }
-  return null;
-}
-
-type DiscussionSource = "github" | "hackernews" | "other";
-
-function sourceOf(url: string): DiscussionSource {
-  try {
-    const hostname = new URL(url).hostname;
-    if (hostname.includes("github.com")) return "github";
-    if (hostname.includes("ycombinator.com")) return "hackernews";
-    return "other";
-  } catch {
-    return "other";
-  }
-}
-
-// "https://github.com/owner/repo/issues/93" -> "owner/repo #93" - real
-// GitHub issue URL shape (see src/fetchers/github_fetcher.py's
-// html_url). "https://news.ycombinator.com/item?id=123" -> "HN #123" -
-// real HN item URL shape (src/fetchers/hn_fetcher.py). Falls back to
-// the bare hostname for anything else rather than guessing a format.
-function formatDiscussionLabel(url: string): string {
-  try {
-    const parsed = new URL(url);
-    if (parsed.hostname.includes("github.com")) {
-      const [owner, repo, , issueNumber] = parsed.pathname.split("/").filter(Boolean);
-      if (owner && repo && issueNumber) return `${owner}/${repo} #${issueNumber}`;
-    }
-    if (parsed.hostname.includes("ycombinator.com")) {
-      const id = parsed.searchParams.get("id");
-      if (id) return `HN #${id}`;
-    }
-    return parsed.hostname;
-  } catch {
-    return url;
-  }
-}
-
-// Card-level "Sources" pills, derived from the real discussion URLs
-// this opportunity is backed by - not per-quote, since
-// OpportunityEntry.supporting_quotes carries no field linking a
-// specific quote back to the source it came from (see AskUserQuestion
-// resolution for this task: fabricating that link per-quote would
-// misattribute evidence, which this project treats as a real
-// evidentiary-integrity violation, not a cosmetic shortcut).
-function deriveSources(urls: string[]): Exclude<DiscussionSource, "other">[] {
-  const seen = new Set<Exclude<DiscussionSource, "other">>();
-  for (const url of urls) {
-    const source = sourceOf(url);
-    if (source !== "other") seen.add(source);
-  }
-  return Array.from(seen);
-}
-
-const SOURCE_LABEL: Record<Exclude<DiscussionSource, "other">, string> = {
-  github: "github",
-  hackernews: "hackernews",
-};
-
-function SpeculativeInfo() {
+function SignalDots({ signal }: { signal: Signal }) {
   return (
-    <Tooltip>
-      <TooltipTrigger
-        className="inline-flex size-3.5 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:text-foreground"
-        aria-label="Why this field is AI-inferred"
-      >
-        <Info className="size-3.5" aria-hidden="true" />
-      </TooltipTrigger>
-      <TooltipContent>{SPECULATIVE_TOOLTIP}</TooltipContent>
-    </Tooltip>
+    <div className="flex shrink-0 flex-col items-end gap-1">
+      <div className="flex gap-[3px]" role="img" aria-label={`${signal.label}: ${signal.filled} of 5`}>
+        {Array.from({ length: 5 }).map((_, i) => (
+          <span
+            key={i}
+            className={cn("size-2.5 rounded-full", i < signal.filled ? TIER_DOT[signal.tier] : "bg-muted")}
+            aria-hidden="true"
+          />
+        ))}
+      </div>
+      <span className={cn("text-[11px] font-medium", TIER_TEXT[signal.tier])}>{signal.label}</span>
+    </div>
   );
 }
 
+// ---------------------------------------------------------------------------
+// Source counting - representative_discussions is a flat URL list with no
+// per-quote correspondence (see the "best quote" section below for why that
+// matters). Counts distinct GitHub repos as "repos"; falls back to the
+// neutral "sources" wording whenever a discussion isn't a GitHub issue (a
+// Hacker News thread isn't a "repo") rather than mislabeling it.
+// ---------------------------------------------------------------------------
+
+function discussionIdentity(url: string): { key: string; isGithub: boolean } {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname.includes("github.com")) {
+      const [owner, repo] = parsed.pathname.split("/").filter(Boolean);
+      return { key: owner && repo ? `${owner}/${repo}` : url, isGithub: true };
+    }
+    return { key: url, isGithub: false };
+  } catch {
+    return { key: url, isGithub: false };
+  }
+}
+
+function summarizeSources(urls: string[]): { count: number; noun: string } {
+  const identities = urls.map(discussionIdentity);
+  const count = new Set(identities.map((d) => d.key)).size;
+  const noun = identities.length > 0 && identities.every((d) => d.isGithub) ? "repos" : "sources";
+  return { count, noun };
+}
+
+function stripProtocol(url: string): string {
+  return url.replace(/^https?:\/\//, "");
+}
+
+// ---------------------------------------------------------------------------
+// Quote keyword highlighting - pain-signal patterns only, on the quote's own
+// real text. Never adds or infers words, only marks ones already present.
+// ---------------------------------------------------------------------------
+
+const HIGHLIGHT_PATTERN =
+  /\b\d+\s*(?:hours?|weeks?|months?|days?|minutes?|years?)\b|\b(?:no|never|missing|broken|fails?|can'?t|unable)\b|\b(?:always|every time|constantly)\b|\b(?:painful|frustrated|impossible|terrible)\b/gi;
+
+function highlightQuote(quote: string): React.ReactNode[] {
+  const nodes: React.ReactNode[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  const pattern = new RegExp(HIGHLIGHT_PATTERN);
+  let key = 0;
+
+  while ((match = pattern.exec(quote)) !== null) {
+    if (match.index > lastIndex) {
+      nodes.push(<React.Fragment key={key++}>{quote.slice(lastIndex, match.index)}</React.Fragment>);
+    }
+    nodes.push(
+      <mark key={key++} className="bg-transparent font-medium not-italic text-foreground/80">
+        {match[0]}
+      </mark>
+    );
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < quote.length) {
+    nodes.push(<React.Fragment key={key++}>{quote.slice(lastIndex)}</React.Fragment>);
+  }
+  return nodes;
+}
+
+// ---------------------------------------------------------------------------
+// Customer tags - parsed from the same suggested_customer_segment string the
+// old card rendered as a sentence, never fabricated from anything else.
+// ---------------------------------------------------------------------------
+
+const MAX_TAG_LENGTH = 20;
+const MAX_TAGS = 3;
+
+function parseCustomerTags(segment: string): string[] {
+  if (!segment.trim()) return [];
+  return segment
+    .split(/\bor\b|\band\b|\/|,/i)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .map((part) => (part.length > MAX_TAG_LENGTH ? `${part.slice(0, MAX_TAG_LENGTH)}…` : part))
+    .slice(0, MAX_TAGS);
+}
+
+// ---------------------------------------------------------------------------
+// Footer action text - frequency-only, deliberately kept as short UI
+// microcopy rather than a real recommendation engine. This is a real,
+// named departure from recommended_next_action's verification-aware
+// 5-branch decision table (src/reporting/report_generator.py) - confirmed
+// via AskUserQuestion before building, see SESSION.md/TODO.md for the
+// full tradeoff. Never claims "build" or "invest", consistent with that
+// table's own hard constraint, even though it no longer reuses it.
+// ---------------------------------------------------------------------------
+
+function footerAction(frequency: number): { text: string; className: string } {
+  if (frequency >= 3) return { text: "High priority — start interviews", className: TIER_TEXT.strong };
+  if (frequency === 2) return { text: "Moderate — validate with 2 interviews", className: TIER_TEXT.moderate };
+  return { text: "Early signal — monitor weekly", className: "text-muted-foreground" };
+}
+
+// ---------------------------------------------------------------------------
+// Verify strip
+// ---------------------------------------------------------------------------
+
+function verifyStripContent(verificationRate: number): { text: string; className: string } {
+  const percent = verificationRate * 100;
+  if (percent >= 65) return { text: "Evidence independently verified against source text", className: TIER_TEXT.strong };
+  if (percent >= 40)
+    return { text: "Partially verified — review source links before acting", className: TIER_TEXT.moderate };
+  return { text: "Low verification — treat as directional signal only", className: "text-muted-foreground" };
+}
+
 /**
- * Renders exactly the fields Task 11 requires on the Report Details
- * page for one opportunity: opportunity score, confidence, verification
- * rate, supporting quotes, suggested customer segment, recommended next
- * action. Reused for both a freshly-completed analysis (Home page) and
- * a historical report (Report Details page) - same component, whether
- * the data came straight from POST /analyze or was reconstructed from
- * saved Markdown (see lib/parse-report-markdown.ts).
+ * One consistent structure for every opportunity: header (#rank of total +
+ * signal dots) -> title -> signal bar -> story paragraph -> best quote
+ * (others collapsed) -> verify strip -> footer (customer tags + action
+ * text). Replaces the score/confidence-badge/SPECULATIVE-label version of
+ * this card (see SESSION.md's 2026-08-07 redesign entries) - deliberate
+ * full replacement per this task's explicit removal list, not an addition
+ * alongside the old system.
  *
- * Speculative fields (opportunity score, customer segment) keep an
- * inline info-icon tooltip each rather than a repeated paragraph
- * disclaimer per card - the shared explanation now lives once, as a
- * page-level footer note (see reports/[reportId]/page.tsx), same
- * information, shown once instead of once per card.
+ * Reused for both a freshly-completed analysis and a historical report
+ * (Report Details page) - same component regardless of whether the data
+ * came straight from POST /analyze or was reconstructed from saved
+ * Markdown (see lib/parse-report-markdown.ts).
  */
-export function OpportunityCard({ opportunity, rank }: { opportunity: OpportunityEntry; rank?: number }) {
-  const verificationLabel = opportunity.has_verification_data
-    ? `${Math.round(opportunity.verification_rate * 100)}% verified`
-    : "No verification data";
-  const sources = deriveSources(opportunity.representative_discussions);
-  const signalTier = signalTierOf(opportunity.frequency);
+export function OpportunityCard({
+  opportunity,
+  rank,
+  total,
+}: {
+  opportunity: OpportunityEntry;
+  rank?: number;
+  total?: number;
+}) {
+  const signal = computeSignal(opportunity.frequency, opportunity.verification_rate);
+  const { count: sourceCount, noun: sourceNoun } = summarizeSources(opportunity.representative_discussions);
+  const isWeakOpacity = opportunity.frequency === 1 && opportunity.verification_rate < 0.5;
+  const isDimmedTitle = opportunity.frequency === 1;
+  const tags = parseCustomerTags(opportunity.suggested_customer_segment);
+  const action = footerAction(opportunity.frequency);
+  const verifyStrip = verifyStripContent(opportunity.verification_rate);
+
+  const [bestQuote, ...restQuotes] = opportunity.supporting_quotes;
 
   return (
-    <Card className={cn("gap-4 rounded-xl py-6", signalTier === "weak" && "opacity-60")}>
-      <CardHeader className="gap-2">
-        <div className="flex items-start justify-between gap-2">
-          {rank ? <span className="text-sm font-medium text-muted-foreground">#{rank}</span> : <span />}
-          <div className="flex items-center gap-1.5">
-            <SignalBadge tier={signalTier} />
-            <ConfidenceBadge confidence={opportunity.confidence} />
-          </div>
-        </div>
-        <CardTitle className="line-clamp-2 text-base font-medium">{opportunity.title}</CardTitle>
-        {signalTier === "weak" ? (
-          <p className="text-xs text-muted-foreground">
-            Only 1 mention found — monitor for recurrence before acting.
-          </p>
-        ) : null}
-        <div className="flex flex-wrap gap-1.5 pt-1 text-xs">
-          <Badge variant="outline" className="gap-1 font-normal">
-            Opportunity: {opportunity.opportunity_score}/100
-            <SpeculativeInfo />
-          </Badge>
-          <Badge variant="outline" className="font-normal">
-            Freq: {opportunity.frequency}
-          </Badge>
-          <Badge variant="outline" className="font-normal">
-            {verificationLabel}
-          </Badge>
-        </div>
+    <Card className={cn("gap-0 overflow-hidden rounded-xl py-0", isWeakOpacity && "opacity-65")}>
+      <CardHeader className="flex-row items-start justify-between gap-2 px-5 pt-5">
+        {rank ? (
+          <span className="text-sm font-medium text-muted-foreground">
+            #{rank}
+            {total ? ` of ${total}` : ""}
+          </span>
+        ) : (
+          <span />
+        )}
+        <SignalDots signal={signal} />
       </CardHeader>
-      <CardContent className="space-y-4 text-sm">
-        <div className="space-y-0.5">
-          <p className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
-            Target customer
-            <SpeculativeInfo />
-          </p>
-          <p className="text-foreground">{opportunity.suggested_customer_segment || "Not specified."}</p>
-        </div>
 
-        <div
+      <CardContent className="px-5 pt-3 pb-5">
+        <h3
           className={cn(
-            "space-y-0.5 rounded-md border-l-2 bg-muted/40 px-3 py-2",
-            ACTION_ACCENT[opportunity.confidence]
+            "mb-4 leading-[1.35] font-medium text-foreground",
+            isDimmedTitle ? "text-[15px] text-muted-foreground" : "text-[17px]"
           )}
         >
-          <p className="text-xs font-medium text-muted-foreground">Recommended action</p>
-          <p className="text-foreground">{opportunity.recommended_next_action}</p>
-        </div>
+          {opportunity.title}
+        </h3>
 
-        <div className="space-y-2">
-          <div className="flex items-center justify-between gap-2">
-            <p className="text-xs font-medium text-muted-foreground">Verified evidence</p>
-            {sources.length > 0 ? (
-              <div className="flex gap-1">
-                {sources.map((source) => (
-                  <Badge key={source} variant="outline" className="font-normal">
-                    {SOURCE_LABEL[source]}
-                  </Badge>
-                ))}
-              </div>
-            ) : null}
-          </div>
-          {opportunity.supporting_quotes.length > 0 ? (
-            <ul className="space-y-2">
-              {opportunity.supporting_quotes.map((quote, i) => (
-                <li
-                  key={i}
-                  className="rounded-r-md border-l-2 border-border bg-muted/30 px-3 py-2 text-[13px] text-muted-foreground"
-                >
-                  &ldquo;{quote}&rdquo;
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="text-muted-foreground">No supporting quotes were independently verified.</p>
+        {/* Signal bar */}
+        <p className="mb-3 text-xs text-muted-foreground">
+          <span className={opportunity.frequency >= 3 ? TIER_TEXT.strong : undefined}>
+            {opportunity.frequency} independent mention{opportunity.frequency === 1 ? "" : "s"}
+          </span>{" "}
+          · across {sourceCount} {sourceNoun} · {Math.round(opportunity.verification_rate * 100)}% verified
+        </p>
+
+        {/* Story paragraph - summary_sentence doesn't exist anywhere in
+            OpportunityEntry, so this always uses the spec's own documented
+            fallback formula, never the primary one. */}
+        <p
+          className={cn(
+            "mb-3 rounded-md border-l-2 bg-muted/30 p-3 text-[13px] leading-relaxed text-muted-foreground",
+            TIER_BORDER[signal.tier]
           )}
-        </div>
+        >
+          {opportunity.frequency} independent discussion{opportunity.frequency === 1 ? "" : "s"} describe this
+          problem across {sourceCount} {sourceNoun}.
+        </p>
 
-        {opportunity.representative_discussions.length > 0 ? (
-          <div className="space-y-1">
-            <p className="text-xs font-medium text-muted-foreground">Representative discussions</p>
-            <ul className="space-y-1">
-              {opportunity.representative_discussions.map((url) => (
-                <li key={url}>
-                  <a
-                    href={url}
-                    target="_blank"
-                    rel="noreferrer noopener"
-                    className="text-primary underline-offset-2 hover:underline"
-                  >
-                    {formatDiscussionLabel(url)}
-                  </a>
-                </li>
-              ))}
-            </ul>
+        {/* Best quote - only the first; the rest sit behind an explicit
+            disclosure, never shown by default. */}
+        {bestQuote ? (
+          <div className="mb-3">
+            <p className="text-[13px] leading-relaxed text-muted-foreground italic">
+              &ldquo;{highlightQuote(bestQuote)}&rdquo;
+            </p>
+            <QuoteSource discussions={opportunity.representative_discussions} />
+            {restQuotes.length > 0 ? (
+              <details className="group mt-2">
+                <summary className="cursor-pointer text-[11px] text-muted-foreground underline-offset-2 hover:underline">
+                  Show {restQuotes.length} more quote{restQuotes.length === 1 ? "" : "s"}
+                </summary>
+                <ul className="mt-2 space-y-2">
+                  {restQuotes.map((quote, i) => (
+                    <li key={i} className="text-[13px] leading-relaxed text-muted-foreground italic">
+                      &ldquo;{highlightQuote(quote)}&rdquo;
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            ) : null}
           </div>
         ) : null}
       </CardContent>
+
+      {/* Verify strip - full width, deliberately outside CardContent's
+          padding so it reaches the card edges. */}
+      <div className={cn("border-t border-border/60 bg-muted/40 px-5 py-2.5 text-[11px]", verifyStrip.className)}>
+        <span className={cn("mr-1.5 inline-block size-1.5 rounded-full align-middle", TIER_DOT[signal.tier])} />
+        {verifyStrip.text}
+      </div>
+
+      {/* Footer row */}
+      <div className="flex flex-wrap items-center justify-between gap-2 px-5 py-3">
+        <div className="flex flex-wrap gap-1.5">
+          {tags.map((tag) => (
+            <span
+              key={tag}
+              className="rounded border border-border/70 bg-muted/60 px-2 py-0.5 text-[11px] text-muted-foreground"
+            >
+              {tag}
+            </span>
+          ))}
+        </div>
+        <span className={cn("text-[11px] font-medium", action.className)}>{action.text}</span>
+      </div>
     </Card>
+  );
+}
+
+/** Only claims a specific quote-source URL when it's unambiguous (exactly
+ * one representative discussion - a single-source cluster, where every
+ * quote necessarily came from that one post). report_generator.py builds
+ * supporting_quotes (across every VERIFIED field on every insight in the
+ * cluster) and representative_discussions (one URL per insight) from
+ * separate iteration orders with no index correspondence - for a
+ * multi-source cluster, pairing quote[0] with url[0] would often be wrong,
+ * and would be *most* often wrong for exactly the high-frequency "strong
+ * signal" clusters this redesign highlights most. Confirmed via
+ * AskUserQuestion before building: multi-source cards get a neutral,
+ * still-traceable disclosure (every real URL, just not claimed as *the*
+ * source of the quote above it) instead of a specific, possibly-wrong one.
+ */
+function QuoteSource({ discussions }: { discussions: string[] }) {
+  if (discussions.length === 0) return null;
+
+  if (discussions.length === 1) {
+    return (
+      <a
+        href={discussions[0]}
+        target="_blank"
+        rel="noreferrer noopener"
+        className="mt-1 block text-[11px] text-muted-foreground/70 hover:text-muted-foreground hover:underline"
+      >
+        {stripProtocol(discussions[0])}
+      </a>
+    );
+  }
+
+  return (
+    <details className="group mt-1">
+      <summary className="cursor-pointer text-[11px] text-muted-foreground/70 underline-offset-2 hover:underline">
+        {discussions.length} linked discussions
+      </summary>
+      <ul className="mt-1 space-y-0.5">
+        {discussions.map((url) => (
+          <li key={url}>
+            <a
+              href={url}
+              target="_blank"
+              rel="noreferrer noopener"
+              className="text-[11px] text-muted-foreground/70 hover:text-muted-foreground hover:underline"
+            >
+              {stripProtocol(url)}
+            </a>
+          </li>
+        ))}
+      </ul>
+    </details>
   );
 }

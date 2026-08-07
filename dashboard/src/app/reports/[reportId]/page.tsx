@@ -3,14 +3,14 @@
 import * as React from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { ArrowLeft, Download, FileQuestion, Info } from "lucide-react";
+import { ArrowLeft, ChevronDown, Download, FileQuestion } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ErrorState } from "@/components/error-state";
-import { OpportunityCard, signalTierOf, type SignalTier } from "@/components/opportunity-card";
+import { OpportunityCard } from "@/components/opportunity-card";
 import { ReportDetailSkeleton } from "@/components/skeletons/report-detail-skeleton";
 import { TopPainPointsChart } from "@/components/charts/top-pain-points-chart";
 import { OpportunityScoresChart } from "@/components/charts/opportunity-scores-chart";
@@ -29,20 +29,34 @@ function formatTimestamp(iso: string): string {
   }
 }
 
-// Validated (frequency >= 3) first, weak (frequency === 1) last - see
-// opportunity-card.tsx's own signalTierOf/SignalBadge for why this
-// exists (a single anecdote shouldn't visually compete with a
-// corroborated pattern) and why this sort can't live inside
-// OpportunityCard itself (a single card has no visibility into its
-// siblings). Array.prototype.sort is stable (ES2019+), so opportunities
-// within the same tier keep their original relative order rather than
-// being silently reshuffled.
-const TIER_ORDER: Record<SignalTier, number> = { validated: 0, normal: 1, weak: 2 };
-
-function sortByFrequencyTier(opportunities: OpportunityEntry[]): OpportunityEntry[] {
-  return [...opportunities].sort(
-    (a, b) => TIER_ORDER[signalTierOf(a.frequency)] - TIER_ORDER[signalTierOf(b.frequency)]
-  );
+/** Splits opportunities into the main list and a collapsed-by-default
+ * "Early signals" section - can't live inside OpportunityCard itself (a
+ * single card has no visibility into its siblings).
+ *
+ * "Early signal" is the literal, narrow condition given (frequency === 1
+ * AND verification_rate < 0.50); "Opportunities" is everything else, not
+ * a separate literal "frequency >= 2 OR verification_rate >= 0.65" filter
+ * - that second condition, read literally, leaves a real gap (e.g.
+ * frequency=1 with verification_rate=0.55 matches neither: not >=2 freq,
+ * not >=0.65 verified, but also not <0.50 verified) that would silently
+ * drop opportunities from both sections. Defining "early" narrowly and
+ * "everything else" as its complement means every opportunity always
+ * lands in exactly one section.
+ */
+function splitByEarlySignal(opportunities: OpportunityEntry[]): {
+  main: OpportunityEntry[];
+  early: OpportunityEntry[];
+} {
+  const main: OpportunityEntry[] = [];
+  const early: OpportunityEntry[] = [];
+  for (const opportunity of opportunities) {
+    if (opportunity.frequency === 1 && opportunity.verification_rate < 0.5) {
+      early.push(opportunity);
+    } else {
+      main.push(opportunity);
+    }
+  }
+  return { main, early };
 }
 
 export default function ReportDetailPage() {
@@ -214,26 +228,74 @@ export default function ReportDetailPage() {
         </CardContent>
       </Card>
 
+      <OpportunitySections opportunities={opportunities} />
+    </div>
+  );
+}
+
+/** Signal dots/verify-strip/action-text on OpportunityCard replaced every
+ * per-field "SPECULATIVE" marker this page used to show (opportunity_score
+ * is no longer displayed at all; suggested_customer_segment now renders as
+ * plain tags with no inline marker) - this single, page-level note is now
+ * the only place that speculative-ness is disclosed, consistent with
+ * CLAUDE.md's "always distinguish evidence from inference" rule. Confirmed
+ * as the right home for it via AskUserQuestion during this task (see
+ * SESSION.md), reusing the same "shown once, not once per card" pattern
+ * this page already established for the old SPECULATIVE footnote.
+ */
+function OpportunitySections({ opportunities }: { opportunities: OpportunityEntry[] }) {
+  const { main, early } = splitByEarlySignal(opportunities);
+
+  if (opportunities.length === 0) {
+    return (
       <div className="space-y-4">
-        <h2 className="text-lg font-semibold tracking-tight">Opportunities ({opportunities.length})</h2>
-        {opportunities.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            No opportunity data available to display for this run.
-          </p>
-        ) : (
-          <div className="grid gap-4 lg:grid-cols-2">
-            {sortByFrequencyTier(opportunities).map((opportunity, i) => (
-              <OpportunityCard key={`${opportunity.title}-${i}`} opportunity={opportunity} rank={i + 1} />
+        <h2 className="text-lg font-semibold tracking-tight">Opportunities (0)</h2>
+        <p className="text-sm text-muted-foreground">No opportunity data available to display for this run.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <h2 className="text-[13px] font-medium text-muted-foreground">Opportunities ({main.length})</h2>
+      {main.length > 0 ? (
+        <div className="grid gap-4 lg:grid-cols-2">
+          {main.map((opportunity, i) => (
+            <OpportunityCard
+              key={`${opportunity.title}-${i}`}
+              opportunity={opportunity}
+              rank={i + 1}
+              total={main.length}
+            />
+          ))}
+        </div>
+      ) : (
+        <p className="text-sm text-muted-foreground">No strong or moderate signals yet for this run.</p>
+      )}
+
+      {early.length > 0 ? (
+        <details className="group">
+          <summary className="flex cursor-pointer list-none items-center gap-1 text-[12px] text-muted-foreground/70 hover:text-muted-foreground">
+            <ChevronDown className="size-3 -rotate-90 transition-transform group-open:rotate-0" aria-hidden="true" />
+            Early signals ({early.length})
+          </summary>
+          <div className="mt-4 grid gap-4 lg:grid-cols-2">
+            {early.map((opportunity, i) => (
+              <OpportunityCard
+                key={`${opportunity.title}-${i}`}
+                opportunity={opportunity}
+                rank={i + 1}
+                total={early.length}
+              />
             ))}
           </div>
-        )}
-        {opportunities.length > 0 ? (
-          <p className="text-xs text-muted-foreground">
-            Fields marked <Info className="inline size-3 align-[-1px]" aria-hidden="true" /> (opportunity score,
-            target customer) are AI-inferred from discussion patterns, not verified findings.
-          </p>
-        ) : null}
-      </div>
+        </details>
+      ) : null}
+
+      <p className="text-xs text-muted-foreground">
+        Opportunity scores and customer-segment tags are AI-inferred from discussion patterns, not verified
+        findings.
+      </p>
     </div>
   );
 }
