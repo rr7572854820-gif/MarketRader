@@ -27,35 +27,72 @@ from src.ai.base import AIProvider, AIProviderError
 
 logger = logging.getLogger(__name__)
 
-# Lowered from 4 - requested to reduce over-aggressive clustering
-# (fewer terms -> fewer, more-overlapping GitHub issues fetched ->
-# less for Aggregator's AI clustering step to over-merge). Implemented
-# as asked; the causal chain from "fewer search terms" to "more final
-# clusters" wasn't independently verified here (if anything, fewer
-# terms means a *smaller* unioned search result, not obviously a more
-# diverse one - see SESSION.md) - flagged, not silently endorsed.
-_DEFAULT_MAX_TERMS = 3
+# Raised from 3 to 8 - requested to dramatically improve expansion
+# quality (product names + technical terms + pain points, not just
+# generic paraphrases). Confirmed via AskUserQuestion before raising
+# this: GitHubFetcher._discover_issues() issues one GitHub Search API
+# call per term (src/fetchers/github_fetcher.py), so this ~triples
+# GitHub API usage per run against an already-exhausted, actively-
+# tracked unauthenticated rate limit (TODO.md), and more discovered
+# discussions also means more load on the separately-unresolved Groq
+# burst-concurrency rate-limit problem (TODO.md, three prior tasks).
+# Neither is fixable from this file; implemented as explicitly
+# specified, with both risks documented as new TODO.md items rather
+# than silently absorbed. The prior 4->3 reduction (see git history)
+# was itself never proven to cause its intended clustering effect
+# (TODO.md), so this isn't a confirmed regression of a verified fix -
+# just a real, separate, mechanically-certain rate-limit cost.
+_DEFAULT_MAX_TERMS = 8
 
 
 def _build_expansion_prompt(user_input: str, max_terms: int) -> str:
-    return f"""Convert ONE user input into {max_terms} specific search terms for finding GitHub repositories and discussions where real users report problems.
+    return f"""You are a market research expert.
+Convert this topic into {max_terms} specific search terms that will find real user complaints on GitHub and HackerNews.
 
-One example, showing the required format only - do not reuse its words, and do not repeat this example in your answer:
-input: "stripe payments broken"
-output: ["stripe api integration", "payment processing saas", "billing system errors"]
+Topic: "{user_input}"
 
-Now convert this input, and only this input:
-"{user_input}"
+Think like this:
+1. What are the main tools/products in this space?
+2. What are the technical terms developers use?
+3. What are related pain points?
+4. What companies solve this problem?
 
 Rules:
-- Each term finds DIFFERENT related content
-- Every term must relate to "{user_input}" specifically, not to the example above
-- Never include generic words: best, ideas, problems, current, pain, market, what, how
-- Focus on the business or technical domain
-- Return ONLY a valid JSON array of {max_terms} strings, nothing else
-- No explanation, no markdown, no backticks, no nested arrays, no extra keys
+- Return {max_terms} terms
+- Mix: product names + technical terms + pain points
+- Never generic words: best, ideas, problems, tool
+- Return ONLY valid JSON array
+- No explanation, no markdown
 
-Output (JSON array only):"""
+The examples below show the required style only - they are not related to
+the actual topic above. Do not reuse their words, and do not repeat any
+of them in your answer; generate terms specific to "{user_input}" only.
+
+"payments" ->
+["stripe checkout", "payment gateway timeout",
+ "billing subscription saas", "invoice generation",
+ "paypal integration", "refund processing",
+ "credit card declined", "checkout flow"]
+
+"authentication" ->
+["oauth2 implementation", "jwt token expiry",
+ "sso login saas", "auth0 alternative",
+ "user authentication", "refresh token",
+ "okta integration", "login security"]
+
+"invoicing" ->
+["invoice generation saas", "invoiceninja",
+ "billing automation", "accounts receivable",
+ "e-invoicing compliance", "gst invoice",
+ "pdf invoice", "recurring billing"]
+
+"developer tools" ->
+["vscode extension", "github copilot alternative",
+ "code review tool", "ci cd pipeline",
+ "developer productivity", "debugging tool",
+ "api testing", "code quality"]
+
+Output JSON array of exactly {max_terms} terms for "{user_input}":"""
 
 
 class QueryExpander:

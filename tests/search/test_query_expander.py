@@ -94,6 +94,76 @@ def test_expand_filters_short_terms():
     assert "valid term" in result
 
 
+def test_expand_returns_8_terms():
+    """_DEFAULT_MAX_TERMS is now 8 (raised from 3 - see this module's
+    own comment on why, including the confirmed GitHub/Groq rate-limit
+    tradeoff). Zero-cost/zero-network per ENGINEERING_GUIDE.md - a
+    canned, well-formed response stands in for what a real provider
+    following the new prompt should return, not a live call.
+    """
+    provider = _FixedResponseProvider(
+        json.dumps(
+            [
+                "stripe checkout",
+                "payment gateway timeout",
+                "billing subscription saas",
+                "invoice generation",
+                "paypal integration",
+                "refund processing",
+                "credit card declined",
+                "checkout flow",
+            ]
+        )
+    )
+    result = QueryExpander(provider).expand("payments")
+
+    assert len(result) == 8
+
+
+def test_expand_no_generic_words():
+    provider = _FixedResponseProvider(
+        json.dumps(
+            [
+                "stripe checkout",
+                "payment gateway timeout",
+                "billing subscription saas",
+                "invoice generation",
+                "paypal integration",
+                "refund processing",
+                "credit card declined",
+                "checkout flow",
+            ]
+        )
+    )
+    result = QueryExpander(provider).expand("payments")
+
+    generic_words = {"best", "ideas", "problems", "tool"}
+    for term in result:
+        term_words = set(term.lower().split())
+        assert not (term_words & generic_words), f"{term!r} contains a generic word"
+
+
+def test_expand_specific_products():
+    provider = _FixedResponseProvider(
+        json.dumps(
+            [
+                "stripe checkout",
+                "payment gateway timeout",
+                "billing subscription saas",
+                "invoice generation",
+                "paypal integration",
+                "refund processing",
+                "credit card declined",
+                "checkout flow",
+            ]
+        )
+    )
+    result = QueryExpander(provider).expand("payments")
+
+    joined = " ".join(result).lower()
+    assert any(product in joined for product in ("stripe", "paypal", "billing", "checkout"))
+
+
 def test_pipeline_uses_expander(tmp_path: Path, monkeypatch, caplog):
     """Pipeline.run() must call QueryExpander.expand(), log the
     expansion, and pass its first returned term - not the raw

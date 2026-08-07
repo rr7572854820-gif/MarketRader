@@ -47,6 +47,28 @@ Ideas worth considering later, explicitly not committed to now.
 
 ## Session Log
 
+## Session — 2026-08-07 (Dramatically improve query expansion - `QueryExpander`)
+
+### Current Objective
+Rewrite `QueryExpander`'s AI prompt to produce richer, more specific search terms (product names, technical terms, pain points) instead of generic paraphrases, and raise `max_terms` from 3 to 8 per the given spec.
+
+### Completed Work
+- Read the required files first. Found the task's own "currently 4" claim was stale (actually 3, lowered from 4 two tasks ago) - minor, didn't change feasibility.
+- Found a real, concrete conflict before writing code and confirmed via `AskUserQuestion`: `GitHubFetcher._discover_issues()` issues one GitHub Search API call per expanded term (`github_fetcher.py:146`), so raising `max_terms` 3->8 means ~2.7x more GitHub Search API calls per run - against an unauthenticated 60/hour limit this session's own testing has already exhausted repeatedly (TODO.md), and more discovered discussions also means more load on the separately-unresolved, three-times-documented Groq burst-concurrency rate-limit problem. Neither is fixable from this file. Resolved: implement exactly as specified (explicit, fully-worked, testable spec), document both compounding risks as new named TODO.md items rather than silently absorb them.
+- Also hardened against a real, already-once-observed failure mode in this exact codebase before implementing (not asked, but same-file and safety-preserving): the given prompt reintroduces four full worked examples with no anti-copying instruction - closely matching the shape of a bug already found and fixed once this session (a real Groq call echoed back a prior 6-example few-shot block instead of answering the real input, fixed by cutting to one example + an explicit "don't reuse this" line). Since one required verification topic ("payments") matches one of the given examples verbatim, kept a lightweight anti-copying instruction so a verbatim echo couldn't silently pass as a real result.
+- `_build_expansion_prompt()` rewritten per the given "market research expert" prompt (4-step reasoning: tools/products, technical terms, pain points, companies), parameterized by `{max_terms}` rather than hardcoding "8" throughout (matches the existing function's own convention, generalizes if a caller ever passes a different value). `_DEFAULT_MAX_TERMS` raised 3 -> 8. All existing parsing/fallback/dict-recovery logic untouched, per the file-only boundary.
+- 3 new tests in `tests/search/test_query_expander.py` (`test_expand_returns_8_terms`, `test_expand_no_generic_words`, `test_expand_specific_products`), all using the existing `_FixedResponseProvider` stub (zero-cost/zero-network, per `ENGINEERING_GUIDE.md` §14 - the task's own required assertions are about parsing/truncation behavior against a well-formed response, not live AI reliability, which the separate live-verification script covers instead). Full suite: 283 passed (up from 280; same 2 pre-existing, unrelated `test_extractor.py` `BATCH_SIZE` failures already tracked in TODO.md, confirmed via `git log` in an earlier task - not caused by this change).
+- **Live-verified against the real, configured provider (Groq)**: all 4 required topics (`payments`, `authentication`, `invoicing`, `developer tools`) returned exactly 8 real, specific, on-topic terms each (real product names: Stripe, Adyen, AWS Cognito, Azure AD B2C, QuickBooks, Zoho, Wave, FreshBooks, Jira) - zero verbatim echoes of the prompt's own examples, confirming the anti-copying safeguard held under a real call. One honest finding, not hidden: 2 of the 32 real terms slipped past the "never generic words" rule anyway (`"adyen integration problems"`, `"code analysis tool"` - contain "problems"/"tool") - doesn't fail any stated requirement (pytest tests use deterministic canned data; the live check only requires 8 terms per topic), but a real, live-measured instance of this exact codebase's own already-documented finding elsewhere that real providers don't reliably follow every prompt instruction.
+
+### Known Issues
+- Raising `max_terms` to 8 mechanically increases GitHub Search API call volume ~2.7x per multi-term run, worsening the already-active, unauthenticated-rate-limit problem, and likely increases discussion volume feeding the separately-unresolved Groq burst-concurrency rate-limit problem - both pre-existing, both out of this file's scope to fix.
+- Groq does not 100% reliably follow the "never generic words" instruction (2/32 real terms in this session's live check contained a nominally-forbidden word) - not a code bug, a real prompt-following gap this codebase has already documented for other prompts.
+
+### Important Decisions
+- Implemented exactly as specified after surfacing the GitHub/Groq rate-limit tradeoff via `AskUserQuestion` (recommended option chosen) - the requirement was explicit, fully-worked, and testable, and this file's boundary can't fix either downstream rate limit anyway.
+
+---
+
 ## Session — 2026-08-07 (Premium redesign of the Report Details page and dashboard form - UI only)
 
 ### Current Objective
