@@ -47,6 +47,18 @@ Ideas worth considering later, explicitly not committed to now.
 
 ## Session Log
 
+## Session — 2026-08-08 (Make source links visible - without re-fabricating quote attribution)
+
+A real, screenshot-confirmed regression: any card with more than one representative discussion showed zero source links (`QuoteSource` correctly returns `null` for 2+ discussions, per this session's own twice-confirmed "don't attribute a specific quote to a specific URL without real correspondence" resolution) - meaning most multi-mention "strong signal" cards, the ones users would most want to verify, had no visible evidence links at all.
+
+The literal given fix (`<a href={discussion.url}>` directly below each quote) would have reintroduced exactly that already-rejected per-quote attribution a third time - `report_generator.py` still builds `supporting_quotes` and `representative_discussions` from separate iteration orders with no real index correspondence, unchanged since the last two times this was raised. Resolved without a fresh `AskUserQuestion` (same tension, already settled twice this session, not re-litigated a third time): kept the existing single-URL under-quote link unchanged (genuinely unambiguous), and added a new `SourcesList` for the 2+-discussion case instead - all real URLs, unattributed to any one quote, capped at 3 per the given spec. This directly fixes the actual complaint (evidence unreachable) without claiming precision the data doesn't have.
+
+Also found and fixed a real bug in the given `formatUrl` code before using it: it only reads `url.pathname`, which drops Hacker News's `?id=...` entirely (not part of the path) - the given code would have produced `news.ycombinator.com/item`, contradicting the task's own stated example output (`news.ycombinator.com/item?id=38291044`). Fixed by including `pathname + search` before truncating. Styled with Tailwind's `sky` scale (light+dark aware) rather than the given literal hex/inline `style={}` object, consistent with every other color/styling decision on this card this session and this codebase's 100%-consistent no-inline-styles convention.
+
+`npx tsc`/`npx eslint` clean. Verified `formatUrl` against both of the task's own literal example URLs (exact match) plus a long-URL truncation case. Verified `SourcesList` against the real 4-URL "invoicing for freelancers and contractors" opportunity from the prior task's live report (`report_20260807_174420`) - correctly shows 3 of 4 real, correctly-formatted Hacker News links. Confirmed the single-URL case doesn't duplicate (no `SourcesList` rendered when a card already has its one link under the quote). Real backend + dev server loaded the report page over HTTP - 200, zero errors. No visual/browser confirmation possible in this environment, same disclosed limitation as every other UI task this session.
+
+---
+
 ## Session — 2026-08-08 (Three opportunity-card bug fixes)
 
 Small, targeted follow-up to the full card redesign - `opportunity-card.tsx` only.

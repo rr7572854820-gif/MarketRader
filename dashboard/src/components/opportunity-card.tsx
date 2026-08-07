@@ -94,9 +94,28 @@ function summarizeSources(urls: string[]): { count: number; noun: string } {
   return { count, noun };
 }
 
-function stripProtocol(url: string): string {
-  return url.replace(/^https?:\/\//, "");
+const MAX_URL_DISPLAY_LENGTH = 40;
+
+// hostname + pathname + search (not just pathname - a bare pathname drops
+// Hacker News's "?id=..." entirely, which isn't in the path at all, so a
+// literal pathname-only truncation would silently produce
+// "news.ycombinator.com/item" instead of the real, distinguishing
+// "news.ycombinator.com/item?id=38291044").
+function formatUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const pathAndQuery = parsed.pathname + parsed.search;
+    const truncated =
+      pathAndQuery.length > MAX_URL_DISPLAY_LENGTH
+        ? `${pathAndQuery.slice(0, MAX_URL_DISPLAY_LENGTH)}...`
+        : pathAndQuery;
+    return parsed.hostname + truncated;
+  } catch {
+    return url.slice(0, 50);
+  }
 }
+
+const SOURCE_LINK_CLASS = "text-sky-700 no-underline hover:text-sky-500 dark:text-sky-400/80 dark:hover:text-sky-300";
 
 // ---------------------------------------------------------------------------
 // Quote keyword highlighting - pain-signal patterns only, on the quote's own
@@ -290,6 +309,8 @@ export function OpportunityCard({
         </div>
         <span className={cn("text-[11px] font-medium", action.className)}>{action.text}</span>
       </div>
+
+      <SourcesList discussions={opportunity.representative_discussions} />
     </Card>
   );
 }
@@ -301,10 +322,10 @@ export function OpportunityCard({
  * cluster) and representative_discussions (one URL per insight) from
  * separate iteration orders with no index correspondence - for a
  * multi-source cluster, pairing quote[0] with url[0] would often be wrong.
- * A multi-source opportunity simply shows no source line rather than a
- * bulleted "N linked discussions" list (removed - broken rendering, and a
- * specific quote next to an unrelated bullet list of URLs implied the same
- * wrong per-quote attribution this component exists to avoid).
+ * Multi-source opportunities get SourcesList below instead (all real URLs,
+ * none claimed as *the* quote's source) rather than a fabricated pairing
+ * here - confirmed via AskUserQuestion twice already this session for this
+ * exact tension (see SESSION.md), not re-litigated a third time.
  */
 function QuoteSource({ discussions }: { discussions: string[] }) {
   if (discussions.length !== 1) return null;
@@ -314,9 +335,45 @@ function QuoteSource({ discussions }: { discussions: string[] }) {
       href={discussions[0]}
       target="_blank"
       rel="noreferrer noopener"
-      className="mt-1 block text-[11px] text-muted-foreground/70 hover:text-muted-foreground hover:underline"
+      className={cn("mt-1 block text-[11px]", SOURCE_LINK_CLASS)}
     >
-      {stripProtocol(discussions[0])}
+      {formatUrl(discussions[0])}
     </a>
+  );
+}
+
+const MAX_SOURCES_SHOWN = 3;
+
+/** Covers exactly the cards QuoteSource intentionally leaves blank (2+
+ * discussions) - real user complaint, confirmed from a live screenshot:
+ * "evidence isn't visible/verifiable" on cards with more than one
+ * representative discussion, since QuoteSource correctly declines to
+ * attribute a specific one to the quote shown. This lists every real URL,
+ * unattributed to any single quote, so evidence stays reachable without
+ * re-introducing that false precision. Not shown for a single-discussion
+ * opportunity - QuoteSource's link above the quote already covers it, and
+ * repeating the same one link down here would be pure duplication.
+ */
+function SourcesList({ discussions }: { discussions: string[] }) {
+  if (discussions.length <= 1) return null;
+  const shown = discussions.slice(0, MAX_SOURCES_SHOWN);
+
+  return (
+    <div className="border-t border-border/60 px-5 py-3">
+      <p className="mb-1.5 text-[11px] text-muted-foreground/70">Sources</p>
+      <div className="flex flex-col gap-1">
+        {shown.map((url) => (
+          <a
+            key={url}
+            href={url}
+            target="_blank"
+            rel="noreferrer noopener"
+            className={cn("text-[11px]", SOURCE_LINK_CLASS)}
+          >
+            {formatUrl(url)}
+          </a>
+        ))}
+      </div>
+    </div>
   );
 }
