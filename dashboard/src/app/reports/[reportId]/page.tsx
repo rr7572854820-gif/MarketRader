@@ -3,7 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { ArrowLeft, Download, FileQuestion } from "lucide-react";
+import { ArrowLeft, Download, FileQuestion, Info } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -113,20 +113,27 @@ export default function ReportDetailPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-        <div className="space-y-1">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="space-y-1.5">
           <Button render={<Link href="/reports" />} nativeButton={false} variant="ghost" size="sm" className="-ml-2.5">
             <ArrowLeft className="size-4" /> Back to Reports
           </Button>
-          <h1 className="font-mono text-xl font-semibold tracking-tight sm:text-2xl">{reportId}</h1>
-          <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-            <Badge variant={summary.succeeded ? "secondary" : "destructive"}>
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="font-mono text-xl font-semibold tracking-tight sm:text-2xl">{reportId}</h1>
+            <Badge
+              variant="outline"
+              className={
+                summary.succeeded
+                  ? "border-emerald-600/30 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-400"
+                  : "border-red-500/30 bg-red-50 text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-400"
+              }
+            >
               {summary.succeeded ? "Succeeded" : "Failed"}
             </Badge>
-            <span>{formatTimestamp(summary.start_time)}</span>
-            <span>·</span>
-            <span>{summary.duration_seconds.toFixed(1)}s</span>
           </div>
+          <p className="text-sm text-muted-foreground">
+            {formatTimestamp(summary.start_time)} · {summary.duration_seconds.toFixed(1)}s
+          </p>
         </div>
         {detail.markdown ? (
           <Button render={<a href={api.downloadUrl(reportId)} download />} nativeButton={false} variant="outline">
@@ -138,13 +145,13 @@ export default function ReportDetailPage() {
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatTile label="Discussions fetched" value={summary.posts_fetched} />
         <StatTile label="Discussions analyzed" value={summary.posts_analyzed} />
-        <StatTile label="Opportunity clusters" value={summary.clusters_found} />
-        <StatTile label="AI calls made" value={summary.ai_calls_made} />
+        <StatTile label="Opportunities" value={summary.clusters_found} />
+        <StatTile label="AI calls" value={summary.ai_calls_made} />
       </div>
 
       {summary.errors.length > 0 ? <RunNotes summary={summary} /> : null}
 
-      <Card>
+      <Card className="border-l-2 border-l-primary/40">
         <CardHeader>
           <CardTitle>Executive Summary</CardTitle>
         </CardHeader>
@@ -204,6 +211,12 @@ export default function ReportDetailPage() {
             ))}
           </div>
         )}
+        {opportunities.length > 0 ? (
+          <p className="text-xs text-muted-foreground">
+            Fields marked <Info className="inline size-3 align-[-1px]" aria-hidden="true" /> (opportunity score,
+            target customer) are AI-inferred from discussion patterns, not verified findings.
+          </p>
+        ) : null}
       </div>
     </div>
   );
@@ -211,7 +224,7 @@ export default function ReportDetailPage() {
 
 function StatTile({ label, value }: { label: string; value: number }) {
   return (
-    <Card className="gap-1 py-3">
+    <Card className="gap-1 rounded-lg py-3">
       <CardContent className="px-4">
         <p className="text-2xl font-semibold tabular-nums">{value}</p>
         <p className="text-xs text-muted-foreground">{label}</p>

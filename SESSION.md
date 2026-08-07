@@ -47,6 +47,46 @@ Ideas worth considering later, explicitly not committed to now.
 
 ## Session Log
 
+## Session — 2026-08-07 (Premium redesign of the Report Details page and dashboard form - UI only)
+
+### Current Objective
+Redesign `reports/[reportId]/page.tsx`, `opportunity-card.tsx`, and the dashboard analysis form to look premium/professional, per a detailed visual spec. UI-only, no backend/API/logic changes.
+
+### Completed Work
+- Read the required files first and confirmed several of the task's own premises against the real code before building, surfacing three real conflicts via `AskUserQuestion` (all three resolved with the recommended option):
+  1. **Report title = "keyword used"**: the keyword a run used is not returned anywhere in the API (`ExecutionSummary`/`ReportDetail` have no `keyword` field, and it isn't embedded in `report_id`/the saved filename - `pipeline.py` names files by timestamp only). With the boundary forbidding backend changes, this is literally impossible as specified. Resolved: kept `report_id` as the title, styled larger and paired with the status badge, instead of a fabricated/scraped keyword.
+  2. **Per-quote `[github]`/`[hackernews]` source badges**: `OpportunityEntry.supporting_quotes` is a plain `string[]` with no field linking a quote to the source it came from - adding a per-quote badge would mean guessing, a real evidentiary-integrity issue for this project. Resolved: dropped per-quote badges; added one real, derived "Sources" pill row per card, computed from `representative_discussions`' actual URLs (`github.com` vs `news.ycombinator.com` hostnames).
+  3. **Hardcoded always-dark hex palette** (`#0d0d0d`, `#111`, `#333`, etc., no light equivalent) applied to `reports/[id]` and the dashboard form - both currently carry the real, working `ThemeToggle` used on every non-landing route, unlike the landing page where forcing dark was a deliberate, scoped, one-off choice. Resolved: implemented the premium look via the existing oklch/CSS-variable token system and Tailwind `dark:` variants (same pattern `confidence-badge.tsx` already used), so light mode keeps rendering correctly.
+- Also found, before writing code: `app/page.tsx` in the task's boundary is stale (moved to `app/dashboard/page.tsx` in the prior landing-page task) - targeted the real dashboard route instead. And the "Source toggle: plain text buttons" claim was already wrong - it's already a pill-shaped shadcn `Tabs` segmented control (`bg-muted` container, `data-active:bg-background` pill) - polished it (rounded-full, smoother transition) rather than rebuilding it from scratch.
+- `globals.css`: added a scoped interactive-element transition rule (buttons/links/inputs/tabs/switch only, not a blanket `* { transition: all }`, which would also animate layout-driven changes and fight the SSE progress bar's own explicit width transition), and a thin scrollbar styled from the theme's own `--border`/`--muted-foreground` tokens (not fixed hex) so it stays correct in both themes.
+- New `components/ui/tooltip.tsx` - a thin wrapper over `@base-ui/react/tooltip`, following the exact convention `dropdown-menu.tsx`/`card.tsx` already use (Portal/Positioner/Popup, `data-slot` attributes, `cn()` for class merging).
+- `components/ui/alert.tsx`: added a `success` variant (emerald, light+dark) alongside the existing `default`/`destructive`.
+- `confidence-badge.tsx`: switched from solid-fill chips to soft bordered pills with light+dark colors approximating the requested palette (emerald/amber/red).
+- `opportunity-card.tsx`: full redesign - rank + confidence badge header row, 2-line-clamped title, metric pills (opportunity score with an info-icon tooltip, frequency, verification rate), target-customer section (info-icon tooltip instead of a repeated paragraph disclaimer), confidence-colored left-accent recommended-action box, "Verified evidence" quotes as clean non-italic left-bordered blocks, a card-level derived Sources pill row, and representative discussions rendered as `owner/repo #N` (GitHub) / `HN #id` (Hacker News) instead of raw URLs - verified against a real saved report's Markdown (`frappe/erpnext_italy/issues/2` → `frappe/erpnext_italy #2`).
+- `reports/[reportId]/page.tsx`: header restyled (`report_id` as a larger heading next to the status badge, date+duration subtitle), stat card labels tightened ("Opportunities"/"AI calls"), Executive Summary card given a left accent border, and a single shared "AI-inferred" footer note added below the opportunity cards (replacing what used to be a paragraph repeated on every card).
+- `analysis-form.tsx`: segmented-control polish (rounded-full pill), keyword input gained a left search icon, taller (44px) height matched across keyword/subreddit/limit inputs, and a live character count; post-run stats became an icon pill row (duration/fetched/analyzed/opportunities/AI calls); "Analysis complete"/"finished with errors" became a colored `Alert` banner instead of plain `CardTitle` text; a `Separator` now divides the form from the results/status area; a new empty state (icon + "Search any topic..." + four clickable example chips that fill the keyword input, never auto-submit - consistent with "the founder decides") shows before any run this session.
+
+### Verification
+- `npx tsc --noEmit` and `npx eslint .` both clean.
+- Started the real backend (`uvicorn src.api.app:app --port 8001`) and the real Next dev server (`next dev --port 3100`), found and stopped one stale leftover `next dev` process from an earlier session still holding port 3100 (confirmed via its command line before stopping it, not assumed).
+- Hit `/`, `/landing`, `/dashboard`, `/reports`, `/reports/{id}`, `/settings` over real HTTP - all 200, zero server/compile errors in either process's log.
+- Confirmed the new dashboard-form markup (empty-state copy, example chips, segmented-control classes, search icon) is actually present in the real server-rendered HTML via `curl`+`grep`, not just assumed from source.
+- Cross-checked `opportunity-card.tsx`'s new URL-parsing logic against a real saved report's Markdown (`GET /reports/{id}`) rather than synthetic data - the GitHub label transform produced the correct real output. No saved report in this project currently contains a Hacker News discussion URL to test that branch live against; verified instead by reading `hn_fetcher.py`'s real URL-construction code directly.
+- Could not visually confirm the redesign reads as "premium" - no `chromium-cli`/Playwright available in this environment (checked, not assumed). Same disclosed limitation as the prior landing-page task.
+
+### Known Issues
+- Full visual verification (does it actually look premium, spacing/hierarchy/contrast at a glance) is not possible in this environment - needs a human to open `/dashboard` and `/reports/{id}` in a real browser.
+- No saved report currently has a Hacker News-sourced discussion URL, so the `HN #id` label path is verified by source-reading, not by a live example.
+
+### Important Decisions
+- All three real conflicts above were resolved via `AskUserQuestion` before implementation, each with the recommended (evidence-preserving / theme-preserving) option selected.
+- Kept the redesign entirely within the existing design-token system rather than introducing fixed hex values, so `reports/[id]` and the dashboard form keep behaving correctly under the app's real, working light/dark toggle.
+
+### Lessons Learned
+- A task's literal color spec (permanent dark hex) can conflict with a working feature (the theme toggle) even when the task never mentions theming at all - worth checking what a spec assumes is "always true" (e.g., "this page is always dark") against what's actually true of the target route, not just the target file.
+
+---
+
 ## Session — 2026-08-07 (Premium dark landing page, and three findings surfaced before building it)
 
 ### Current Objective

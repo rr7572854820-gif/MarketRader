@@ -127,6 +127,42 @@
   html {
     @apply font-sans;
   }
+  /* Premium-redesign polish (Task: report/dashboard UI redesign): smooth
+   * state changes on interactive elements only - not a blanket `* {
+   * transition: all }`, which would also animate layout-driven size/
+   * position changes and fight the SSE progress bar's own explicit
+   * width transition below. */
+  button,
+  a,
+  input,
+  summary,
+  [role="button"],
+  [data-slot="switch"],
+  [data-slot="tabs-trigger"] {
+    transition:
+      background-color 0.15s ease,
+      border-color 0.15s ease,
+      color 0.15s ease,
+      box-shadow 0.15s ease,
+      transform 0.15s ease;
+  }
+}
+
+/* Thin, low-contrast scrollbar using the theme's own tokens (not fixed
+ * hex) so it stays correct in both light and dark mode. */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted-foreground);
 }
 
 /* --- AnalysisProgress (SSE progress UI) animations ----------------------

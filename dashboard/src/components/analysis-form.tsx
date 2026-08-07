@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { Loader2, PlayCircle } from "lucide-react";
+import { Loader2, PlayCircle, Search, Radar, CheckCircle2, Clock, Inbox, Sparkles, Bot } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -12,6 +12,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Alert, AlertTitle } from "@/components/ui/alert";
+import { Separator } from "@/components/ui/separator";
 import { ErrorState } from "@/components/error-state";
 import { AnalysisResultSkeleton } from "@/components/skeletons/analysis-result-skeleton";
 import { AnalysisProgress } from "@/components/analysis-progress";
@@ -237,7 +239,7 @@ export function AnalysisForm() {
                 value={source}
                 onValueChange={(value) => setSource(value as Source)}
               >
-                <TabsList>
+                <TabsList className="rounded-full bg-muted p-1">
                   {/* Reddit hidden from the dashboard UI only - source="reddit"
                       stays fully supported everywhere else (backend, API,
                       pipeline, fetcher factory all untouched). Re-add this
@@ -245,13 +247,25 @@ export function AnalysisForm() {
                   {/* <TabsTrigger value="reddit" disabled={isSubmitting}>
                     Reddit
                   </TabsTrigger> */}
-                  <TabsTrigger value="all" disabled={isSubmitting}>
+                  <TabsTrigger
+                    value="all"
+                    disabled={isSubmitting}
+                    className="rounded-full data-active:bg-background data-active:text-foreground data-active:shadow-sm"
+                  >
                     All Sources
                   </TabsTrigger>
-                  <TabsTrigger value="github" disabled={isSubmitting}>
+                  <TabsTrigger
+                    value="github"
+                    disabled={isSubmitting}
+                    className="rounded-full data-active:bg-background data-active:text-foreground data-active:shadow-sm"
+                  >
                     GitHub
                   </TabsTrigger>
-                  <TabsTrigger value="hackernews" disabled={isSubmitting}>
+                  <TabsTrigger
+                    value="hackernews"
+                    disabled={isSubmitting}
+                    className="rounded-full data-active:bg-background data-active:text-foreground data-active:shadow-sm"
+                  >
                     HackerNews
                   </TabsTrigger>
                 </TabsList>
@@ -270,6 +284,7 @@ export function AnalysisForm() {
                     disabled={isSubmitting}
                     aria-invalid={Boolean(fieldErrors.subreddit)}
                     aria-describedby={fieldErrors.subreddit ? "subreddit-error" : undefined}
+                    className="h-11"
                   />
                   {fieldErrors.subreddit ? (
                     <p id="subreddit-error" className="text-sm text-destructive">
@@ -285,17 +300,29 @@ export function AnalysisForm() {
                 <Label htmlFor="keyword">
                   {hasNoMockEquivalent(source) ? "What are you looking for?" : "Keyword (optional)"}
                 </Label>
-                <Input
-                  id="keyword"
-                  value={keyword}
-                  onChange={(e) => setKeyword(e.target.value)}
-                  placeholder={
-                    source === "github" ? "e.g. I keep hearing people complain about invoice automation" : "invoicing"
-                  }
-                  disabled={isSubmitting}
-                  aria-invalid={Boolean(fieldErrors.keyword)}
-                  aria-describedby={fieldErrors.keyword ? "keyword-error" : undefined}
-                />
+                <div className="relative">
+                  <Search
+                    className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground"
+                    aria-hidden="true"
+                  />
+                  <Input
+                    id="keyword"
+                    value={keyword}
+                    onChange={(e) => setKeyword(e.target.value)}
+                    placeholder={
+                      source === "github"
+                        ? "e.g. I keep hearing people complain about invoice automation"
+                        : "e.g. invoicing, developer tools, payments"
+                    }
+                    disabled={isSubmitting}
+                    aria-invalid={Boolean(fieldErrors.keyword)}
+                    aria-describedby={fieldErrors.keyword ? "keyword-error" : undefined}
+                    className="h-11 pr-14 pl-9"
+                  />
+                  <span className="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-xs tabular-nums text-muted-foreground">
+                    {keyword.length}
+                  </span>
+                </div>
                 {fieldErrors.keyword ? (
                   <p id="keyword-error" className="text-sm text-destructive">
                     {fieldErrors.keyword}
@@ -325,6 +352,7 @@ export function AnalysisForm() {
                   disabled={isSubmitting}
                   aria-invalid={Boolean(fieldErrors.limit)}
                   aria-describedby={fieldErrors.limit ? "limit-error" : undefined}
+                  className="h-11"
                 />
                 {fieldErrors.limit ? (
                   <p id="limit-error" className="text-sm text-destructive">
@@ -370,6 +398,8 @@ export function AnalysisForm() {
         </CardContent>
       </Card>
 
+      <Separator />
+
       {runMode === "streaming" ? (
         <AnalysisProgress
           keyword={keyword.trim()}
@@ -404,11 +434,46 @@ export function AnalysisForm() {
           }}
         />
       ) : null}
+
+      {runMode === "idle" && !result && !error ? (
+        <EmptyFormState onPickExample={(topic) => setKeyword(topic)} />
+      ) : null}
     </div>
   );
 }
 
 const TOPIC_SUGGESTIONS = ["invoicing", "payments", "authentication"];
+const EXAMPLE_TOPICS = ["invoicing", "authentication", "developer tools", "payments"];
+
+/** Shown before any analysis has been run this session - a plain blank
+ * space above the form's own helper text felt unfinished for a first-
+ * time visitor, so this names what to do next and offers real,
+ * clickable starting points (fills the keyword input, doesn't submit -
+ * the founder still decides when to actually run it, per CLAUDE.md's
+ * "the founder decides" principle).
+ */
+function EmptyFormState({ onPickExample }: { onPickExample: (topic: string) => void }) {
+  return (
+    <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-border py-12 text-center">
+      <Radar className="size-8 text-muted-foreground/50" aria-hidden="true" />
+      <p className="max-w-xs text-sm text-muted-foreground">
+        Search any topic to discover real market opportunities.
+      </p>
+      <div className="flex flex-wrap items-center justify-center gap-2">
+        {EXAMPLE_TOPICS.map((topic) => (
+          <Badge
+            key={topic}
+            variant="outline"
+            render={<button type="button" onClick={() => onPickExample(topic)} />}
+            className="cursor-pointer font-normal hover:bg-muted"
+          >
+            {topic}
+          </Badge>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 /** Evidence-integrity note (see CLAUDE.md §5, "never silently drop
  * uncertainty"): this summary never hides *that* some discussions
@@ -433,15 +498,33 @@ function AnalysisResultSummary({
 
   return (
     <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          {summary.succeeded ? "Analysis complete" : "Analysis finished with errors"}
-        </CardTitle>
-        <CardDescription>
-          {summary.duration_seconds.toFixed(1)}s · {summary.posts_fetched} fetched · {summary.posts_analyzed}{" "}
-          analyzed · {summary.clusters_found} opportunity cluster(s) · {summary.ai_calls_made} AI call(s) (
-          {summary.cache_hits} cache hit(s))
-        </CardDescription>
+      <CardHeader className="gap-3">
+        <Alert variant={summary.succeeded ? "success" : "destructive"}>
+          {summary.succeeded ? (
+            <CheckCircle2 className="size-4" aria-hidden="true" />
+          ) : (
+            <Sparkles className="size-4" aria-hidden="true" />
+          )}
+          <AlertTitle>{summary.succeeded ? "Analysis complete" : "Analysis finished with errors"}</AlertTitle>
+        </Alert>
+        <div className="flex flex-wrap gap-1.5">
+          <Badge variant="outline" className="gap-1 font-normal">
+            <Clock className="size-3" aria-hidden="true" /> {summary.duration_seconds.toFixed(1)}s
+          </Badge>
+          <Badge variant="outline" className="gap-1 font-normal">
+            <Inbox className="size-3" aria-hidden="true" /> {summary.posts_fetched} fetched
+          </Badge>
+          <Badge variant="outline" className="gap-1 font-normal">
+            <Search className="size-3" aria-hidden="true" /> {summary.posts_analyzed} analyzed
+          </Badge>
+          <Badge variant="outline" className="gap-1 font-normal">
+            <Sparkles className="size-3" aria-hidden="true" /> {summary.clusters_found} opportunities
+          </Badge>
+          <Badge variant="outline" className="gap-1 font-normal">
+            <Bot className="size-3" aria-hidden="true" /> {summary.ai_calls_made} AI calls ({summary.cache_hits}{" "}
+            cached)
+          </Badge>
+        </div>
       </CardHeader>
       <CardContent className="space-y-4">
         {summary.errors.length > 0 ? (
