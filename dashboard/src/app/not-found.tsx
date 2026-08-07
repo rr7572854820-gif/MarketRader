@@ -11,7 +11,7 @@ export default function NotFound() {
         <Compass className="size-10 text-muted-foreground" aria-hidden="true" />
         <p className="text-lg font-medium">Page not found</p>
         <p className="max-w-sm text-muted-foreground">This page doesn&apos;t exist. Try the Home or Reports page instead.</p>
-        <Button render={<Link href="/" />} nativeButton={false} variant="outline">
+        <Button render={<Link href="/dashboard" />} nativeButton={false} variant="outline">
           Go home
         </Button>
       </CardContent>
