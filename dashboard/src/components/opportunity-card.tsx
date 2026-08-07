@@ -208,7 +208,7 @@ export function OpportunityCard({
   const action = footerAction(opportunity.frequency);
   const verifyStrip = verifyStripContent(opportunity.verification_rate);
 
-  const [bestQuote, ...restQuotes] = opportunity.supporting_quotes;
+  const bestQuote = opportunity.supporting_quotes[0];
 
   return (
     <Card className={cn("gap-0 overflow-hidden rounded-xl py-0", isWeakOpacity && "opacity-65")}>
@@ -242,41 +242,29 @@ export function OpportunityCard({
           · across {sourceCount} {sourceNoun} · {Math.round(opportunity.verification_rate * 100)}% verified
         </p>
 
-        {/* Story paragraph - summary_sentence doesn't exist anywhere in
-            OpportunityEntry, so this always uses the spec's own documented
-            fallback formula, never the primary one. */}
+        {/* Story paragraph - no "summary" field exists anywhere on
+            OpportunityEntry (confirmed against lib/api/types.ts), so this
+            always uses the given fallback formula, never a primary
+            "summary field" branch that has nothing to read from. Doesn't
+            restate frequency/source-count/verification - those already
+            appear in the signal bar directly above this paragraph. */}
         <p
           className={cn(
             "mb-3 rounded-md border-l-2 bg-muted/30 p-3 text-[13px] leading-relaxed text-muted-foreground",
             TIER_BORDER[signal.tier]
           )}
         >
-          {opportunity.frequency} independent discussion{opportunity.frequency === 1 ? "" : "s"} describe this
-          problem across {sourceCount} {sourceNoun}.
+          {opportunity.frequency} developer{opportunity.frequency === 1 ? "" : "s"} reported this independently.
+          {bestQuote ? " See quote below for the strongest evidence." : ""}
         </p>
 
-        {/* Best quote - only the first; the rest sit behind an explicit
-            disclosure, never shown by default. */}
+        {/* Best quote only - no expand/collapse for additional quotes. */}
         {bestQuote ? (
           <div className="mb-3">
             <p className="text-[13px] leading-relaxed text-muted-foreground italic">
               &ldquo;{highlightQuote(bestQuote)}&rdquo;
             </p>
             <QuoteSource discussions={opportunity.representative_discussions} />
-            {restQuotes.length > 0 ? (
-              <details className="group mt-2">
-                <summary className="cursor-pointer text-[11px] text-muted-foreground underline-offset-2 hover:underline">
-                  Show {restQuotes.length} more quote{restQuotes.length === 1 ? "" : "s"}
-                </summary>
-                <ul className="mt-2 space-y-2">
-                  {restQuotes.map((quote, i) => (
-                    <li key={i} className="text-[13px] leading-relaxed text-muted-foreground italic">
-                      &ldquo;{highlightQuote(quote)}&rdquo;
-                    </li>
-                  ))}
-                </ul>
-              </details>
-            ) : null}
           </div>
         ) : null}
       </CardContent>
@@ -312,48 +300,23 @@ export function OpportunityCard({
  * supporting_quotes (across every VERIFIED field on every insight in the
  * cluster) and representative_discussions (one URL per insight) from
  * separate iteration orders with no index correspondence - for a
- * multi-source cluster, pairing quote[0] with url[0] would often be wrong,
- * and would be *most* often wrong for exactly the high-frequency "strong
- * signal" clusters this redesign highlights most. Confirmed via
- * AskUserQuestion before building: multi-source cards get a neutral,
- * still-traceable disclosure (every real URL, just not claimed as *the*
- * source of the quote above it) instead of a specific, possibly-wrong one.
+ * multi-source cluster, pairing quote[0] with url[0] would often be wrong.
+ * A multi-source opportunity simply shows no source line rather than a
+ * bulleted "N linked discussions" list (removed - broken rendering, and a
+ * specific quote next to an unrelated bullet list of URLs implied the same
+ * wrong per-quote attribution this component exists to avoid).
  */
 function QuoteSource({ discussions }: { discussions: string[] }) {
-  if (discussions.length === 0) return null;
-
-  if (discussions.length === 1) {
-    return (
-      <a
-        href={discussions[0]}
-        target="_blank"
-        rel="noreferrer noopener"
-        className="mt-1 block text-[11px] text-muted-foreground/70 hover:text-muted-foreground hover:underline"
-      >
-        {stripProtocol(discussions[0])}
-      </a>
-    );
-  }
+  if (discussions.length !== 1) return null;
 
   return (
-    <details className="group mt-1">
-      <summary className="cursor-pointer text-[11px] text-muted-foreground/70 underline-offset-2 hover:underline">
-        {discussions.length} linked discussions
-      </summary>
-      <ul className="mt-1 space-y-0.5">
-        {discussions.map((url) => (
-          <li key={url}>
-            <a
-              href={url}
-              target="_blank"
-              rel="noreferrer noopener"
-              className="text-[11px] text-muted-foreground/70 hover:text-muted-foreground hover:underline"
-            >
-              {stripProtocol(url)}
-            </a>
-          </li>
-        ))}
-      </ul>
-    </details>
+    <a
+      href={discussions[0]}
+      target="_blank"
+      rel="noreferrer noopener"
+      className="mt-1 block text-[11px] text-muted-foreground/70 hover:text-muted-foreground hover:underline"
+    >
+      {stripProtocol(discussions[0])}
+    </a>
   );
 }

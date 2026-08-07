@@ -47,6 +47,18 @@ Ideas worth considering later, explicitly not committed to now.
 
 ## Session Log
 
+## Session — 2026-08-08 (Three opportunity-card bug fixes)
+
+Small, targeted follow-up to the full card redesign - `opportunity-card.tsx` only.
+
+1. **Removed the "N linked discussions" bulleted list** entirely (`QuoteSource` now only ever renders the single-URL case; returns `null` for 0 or 2+ discussions instead of a `<details>` disclosure). The prior task's own multi-source resolution already avoided attributing a specific URL to the quote above it in the ambiguous case - this just stops offering an unattributed bullet list as a consolation, per this task's explicit instruction, rather than replacing it with anything else.
+2. **Removed the "Show N more quotes" expand/collapse** entirely - `bestQuote` is now just `supporting_quotes[0]`, no `restQuotes` handling at all.
+3. **Story paragraph no longer restates the signal bar's own numbers.** No `summary` field exists anywhere on `OpportunityEntry` (confirmed against `lib/api/types.ts`, same finding as the immediately-prior task's `summary_sentence` case), so this always uses the given fallback formula: `"{frequency} developers reported this independently."`, plus `" See quote below for the strongest evidence."` only when a quote actually exists below it (a small, honest defensive addition - the given text would otherwise reference a quote that isn't there for a zero-quote opportunity).
+
+`npx tsc`/`npx eslint` clean. Verified structurally against a real report (`report_20260807_174420`, from the prior task's own live run): confirmed via source grep that no trace of "Show N more quotes" or "linked discussions" rendering remains, and traced the exact real "invoicing for freelancers and contractors" opportunity (frequency=4, 5 real quotes, 4 real discussion URLs) through the new logic - only quote[0] renders, no source line (4 discussions is ambiguous), story paragraph reads "4 developers reported this independently. See quote below for the strongest evidence." Real backend + dev server loaded the report page over HTTP - 200, zero errors. No visual/browser confirmation possible in this environment (no chromium-cli/Playwright), same disclosed limitation as every other UI task this session.
+
+---
+
 ## Session — 2026-08-07 (Full opportunity card redesign — signal dots, story paragraph, single quote, verify strip)
 
 ### Current Objective
