@@ -93,6 +93,34 @@ app.include_router(router)
 logger = logging.getLogger(__name__)
 
 
+@app.get("/debug/keys")
+def debug_keys():
+    """Temporary diagnostic - remove once the "only 1 of 3 configured
+    Groq keys loads" question is answered. Booleans only, never key
+    values (config.py's own header comment: "exactly one place that
+    could leak a secret" - this must not become a second one) - but
+    even boolean presence/absence of a secret is real information on
+    this API's live, unauthenticated production deployment (see this
+    module's own CORS docstring above), so this should not stay past
+    its debugging purpose.
+    """
+    from src.config import load_config
+
+    config = load_config()
+    return {
+        "groq_api_key": bool(config.groq_api_key),
+        "groq_api_key_1": bool(getattr(config, "groq_api_key_1", None)),
+        "groq_api_key_2": bool(getattr(config, "groq_api_key_2", None)),
+        "groq_api_key_3": bool(getattr(config, "groq_api_key_3", None)),
+        "total_keys": len(config.groq_api_keys),
+        "key_names": [
+            k
+            for k in ["groq_api_key", "groq_api_key_1", "groq_api_key_2", "groq_api_key_3"]
+            if getattr(config, k, None)
+        ],
+    }
+
+
 @app.exception_handler(Exception)
 async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Last-resort safety net: an unhandled exception must never leak a

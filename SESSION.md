@@ -47,6 +47,16 @@ Ideas worth considering later, explicitly not committed to now.
 
 ## Session Log
 
+## Session — 2026-08-08 (Debug endpoint: why only 1 of 3 Groq keys loads)
+
+Read `src/config.py` in full first - the loading code itself has no bug: `groq_api_key_1/2/3` are each read via the same `_env_str()` helper as every other credential, and `groq_api_keys` correctly filters to only the ones actually set. Added the requested `GET /debug/keys` endpoint to `src/api/app.py` (boolean presence only, never raw key values - `config.py`'s own header comment calls out being "exactly one place that could leak a secret," and this must not become a second one) and confirmed live against the real local `.env`: `groq_api_key_1/2/3` are all `false`, `total_keys: 0` - only the legacy single `GROQ_API_KEY` is actually set in this environment. There is no bug to fix; the 3 numbered keys were simply never configured here, matching an already-tracked, still-open `TODO.md` item from the earlier key-rotation task ("Render's environment variables still need `GROQ_API_KEY_1/_2/_3` added manually by the user").
+
+Flagged, not silently added: this API is confirmed live in production with no authentication (`app.py`'s own CORS docstring names the real Render/Vercel deployment) - a boolean-only endpoint doesn't leak secret values, but it does reveal which secrets exist to any unauthenticated caller, which is real information on a public endpoint. Marked clearly as temporary in its own docstring; should be removed once this question is answered, not left in place.
+
+Also placed in `app.py` per the task's explicit instruction, noting this deviates from that file's own stated convention ("every actual endpoint lives in `src/api/routes.py`") - a reasonable, explicitly-requested exception for a temporary diagnostic, not a precedent for future endpoints.
+
+---
+
 ## Session — 2026-08-08 (Multi-key parallel Groq extraction - one worker thread per configured key)
 
 ### Current Objective
