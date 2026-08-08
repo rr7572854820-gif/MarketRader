@@ -100,19 +100,28 @@ _MULTI_SOURCE_EXPANSION = ("github", "hackernews")
 # "Github"/"Hackernews", not "GitHub"/"Hacker News".
 _SOURCE_DISPLAY_NAMES = {"github": "GitHub", "hackernews": "Hacker News", "hn": "Hacker News"}
 
-# Hard ceiling on the combined discussion count _fetch_all_sources()
-# ever targets across every source, regardless of how high a caller's
-# own query.limit is (the dashboard sends up to MAX_LIMIT=100 as
-# post_limit for source="all" - see analysis-form.tsx's
-# effectiveFetchLimit(), added specifically to give calculate_fetch_limit()
-# oversampling room). Extraction (Extractor.BATCH_SIZE=2, BATCH_DELAY=1.5s)
-# runs sequentially per post - the more discussions fetched, the longer
-# that burst runs and the more likely it exhausts Groq's free-tier rate
-# limit before the fixed 3s post-extraction cooldown
-# (_POST_EXTRACTION_DELAY_SECONDS) has any real chance to let it reset,
-# which then makes clustering's own AI call fail too. 25 keeps that
-# burst short enough in practice that the cooldown is usually enough.
-_MAX_TOTAL_ALL_SOURCES = 25
+# Per-source ceiling for a source="all" run - each source's own API
+# per-request limit (GitHub: _MAX_PER_PAGE=100 in github_fetcher.py;
+# Hacker News's Algolia search matches the same 100-per-request
+# ceiling), not an arbitrary combined-total number. The combined target
+# itself is whatever query.limit already is when _fetch_all_sources()
+# is called (calculate_fetch_limit(num_reports), or post_limit
+# otherwise - see _initial_fetch_limit()) - no separate cap on top of
+# that.
+#
+# Removed the previous _MAX_TOTAL_ALL_SOURCES=25 combined cap here
+# (confirmed via AskUserQuestion before removing it - see SESSION.md).
+# That cap was a real, deliberate, previously-tested mitigation for a
+# real, repeatedly-measured problem: Extractor.BATCH_SIZE=2 firing
+# concurrent requests during extraction can exhaust Groq's free-tier
+# rate limit, and more discussions fetched means a longer burst and
+# more exposure. Removing it directly trades "requested report counts
+# are more likely to actually be met" for "more Groq rate-limit
+# exposure per run" - a real, known, unresolved tradeoff (TODO.md), not
+# a fixed one. Still out of this file's scope to fix the root cause
+# (burst concurrency, not volume) - see Extractor.BATCH_SIZE/
+# _POST_EXTRACTION_DELAY_SECONDS for where that would need to happen.
+_MAX_PER_SOURCE_LIMIT = 100
 
 # GitHub/Hacker News-only report-count reliability (PipelineConfig.num_reports):
 # calculate_fetch_limit() decides how many discussions to request on
@@ -689,15 +698,15 @@ class Pipeline:
         Each source's own FetchQuery.limit is query.limit split evenly
         across `sources` (_split_limit) - the combined result still
         targets roughly query.limit discussions overall, not
-        query.limit from every source independently. query.limit is
-        itself first capped at _MAX_TOTAL_ALL_SOURCES (25) - see that
-        constant's own comment for why a large combined target risks
-        exhausting Groq's rate limit during the extraction burst that
-        follows, before clustering's own AI call ever gets to run.
+        query.limit from every source independently. Each source's
+        resulting per-source limit is capped only at
+        _MAX_PER_SOURCE_LIMIT (100) - that source's own real API
+        per-request ceiling, not an arbitrary combined-total number
+        (see that constant's own comment for the real rate-limit
+        tradeoff this implies).
         """
         logger.info("Fetching from %d source(s) simultaneously: %s", len(sources), sources)
-        capped_total = min(query.limit, _MAX_TOTAL_ALL_SOURCES)
-        per_source_limit = self._split_limit(capped_total, len(sources))
+        per_source_limit = min(self._split_limit(query.limit, len(sources)), _MAX_PER_SOURCE_LIMIT)
         per_source_query = replace(query, limit=per_source_limit)
 
         # [DIAGNOSTIC] temporary - remove after verification.

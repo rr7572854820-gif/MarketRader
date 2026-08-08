@@ -772,13 +772,14 @@ def test_oversample_split_between_sources(tmp_path: Path, monkeypatch):
     combined fetch target evenly across the two active sources, not
     request the full target from each independently. calculate_fetch_limit(10)
     is 30 (3x multiplier for a small request, see calculate_fetch_limit's
-    own docstring) - but _fetch_all_sources() caps the combined target at
-    _MAX_TOTAL_ALL_SOURCES (25, added to bound the extraction burst that
-    follows and avoid exhausting Groq's rate limit before clustering's
-    own AI call runs - see that constant's own comment) before splitting,
-    so each source's FetchQuery.limit is 12 (25 // 2, _split_limit's own
-    floor division), not 15 - the two sources' results sum back to 24,
-    not the full uncapped 30.
+    own docstring) - _fetch_all_sources() no longer caps that combined
+    target at an arbitrary number before splitting (the previous
+    _MAX_TOTAL_ALL_SOURCES=25 cap was removed - see that removal's own
+    comment in pipeline.py for the real Groq rate-limit tradeoff this
+    implies), only at each source's own per-request API ceiling
+    (_MAX_PER_SOURCE_LIMIT=100, far above 15 here) - so each source's
+    FetchQuery.limit is 15 (30 // 2, _split_limit's own floor division),
+    the two sources' results summing back to the full uncapped 30.
 
     post_limit is deliberately set equal to the uncapped 30 (not left at
     a generous default) so _should_oversample's own "still has headroom
@@ -804,7 +805,53 @@ def test_oversample_split_between_sources(tmp_path: Path, monkeypatch):
     )
     Pipeline(config).run()
 
-    assert limits_seen == [12, 12]
+    assert limits_seen == [15, 15]
+
+
+def test_no_hardcoded_25_cap(tmp_path: Path, monkeypatch):
+    """The previous _MAX_TOTAL_ALL_SOURCES=25 combined cap is gone -
+    calculate_fetch_limit(30) is 60 (2x multiplier - see its own
+    docstring), split evenly across 2 sources is 30 each. Under the old
+    25-cap this would have been min(60, 25)//2 = 12, well below 30 -
+    this test would have failed against that code, which is the point.
+
+    post_limit is set well above 60 so _initial_fetch_limit()'s own
+    min(calculate_fetch_limit(...), post_limit) doesn't clip the target
+    before it ever reaches _fetch_all_sources() - isolates this test to
+    the removed-cap behavior specifically, not post_limit interaction.
+    """
+    import src.pipeline.pipeline as pipeline_module
+
+    limits_seen: List[int] = []
+
+    def _stub_get_fetcher(config, *, source="reddit", force_mock=False):
+        return _make_fetcher([_post(f"{source}-1")], calls=limits_seen)
+
+    monkeypatch.setattr(pipeline_module, "get_fetcher", _stub_get_fetcher)
+
+    assert calculate_fetch_limit(30) == 60
+    config = PipelineConfig(
+        source="all", keyword="invoicing", post_limit=100, num_reports=30, output_dir=tmp_path, ai_provider="mock",
+        cache_path=tmp_path / "ai_cache.json",
+    )
+    Pipeline(config).run()
+
+    assert all(limit >= 30 for limit in limits_seen)
+
+
+def test_scales_with_user_request():
+    """calculate_fetch_limit() is the "total_fetch" step of this task's
+    own given formula (total_fetch = calculate_fetch_limit(num_reports))
+    - a pure, already-existing function, unmodified by this task
+    (removing the combined-total cap happens downstream of it, in
+    _fetch_all_sources()). Testing it directly here rather than via a
+    full Pipeline run avoids conflating this assertion with
+    _split_limit()'s own floor-division rounding (e.g. 75 split across
+    2 sources sums back to 74, not 75 - a real, separate rounding
+    detail, not evidence that the combined *target* itself failed to
+    scale).
+    """
+    assert calculate_fetch_limit(50) >= 75
 
 
 def test_combined_discussions_deduplicated(tmp_path: Path, monkeypatch):
