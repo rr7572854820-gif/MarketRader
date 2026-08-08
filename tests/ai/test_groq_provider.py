@@ -171,6 +171,38 @@ def test_single_key_backward_compatible():
     assert result == "hello"
 
 
+# --- Per-key providers for parallel extraction (get_all_key_providers) -----------
+
+
+def test_get_all_key_providers():
+    with patch("src.ai.groq_provider.Groq") as mock_client_cls:
+        mock_client_cls.return_value.chat.completions.create.return_value = _mock_completion("ok")
+        provider = GroqProvider(_multi_key_config("key-1", "key-2", "key-3"))
+        key_providers = provider.get_all_key_providers()
+
+    assert len(key_providers) == 3
+    assert all(isinstance(p, GroqProvider) for p in key_providers)
+    # Each returned provider is bound to exactly one distinct key, in
+    # order - not a copy of the original 3-key provider (which would
+    # be able to rotate between all 3 itself, defeating the point of
+    # handing out independent, single-key providers for parallel use).
+    assert [p.api_keys for p in key_providers] == [["key-1"], ["key-2"], ["key-3"]]
+    assert all(p.current_key_index == 0 for p in key_providers)
+
+
+def test_get_provider_for_key_uses_only_that_key():
+    with patch("src.ai.groq_provider.Groq") as mock_client_cls:
+        mock_client_cls.return_value.chat.completions.create.return_value = _mock_completion("ok")
+        provider = GroqProvider(_multi_key_config("key-1", "key-2", "key-3"))
+        single = provider.get_provider_for_key(1)
+
+    assert single.api_keys == ["key-2"]
+    # A real, independent GroqProvider - generate_text() on it must not
+    # touch the original 3-key provider's own state (current_key_index,
+    # client) at all.
+    assert single is not provider
+
+
 # --- get_ai_provider factory priority: Groq -> Gemini -> Mock --------------------
 
 

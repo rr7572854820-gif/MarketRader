@@ -328,6 +328,141 @@ def test_extract_failed_items_skipped():
     assert len(insights) == 3
 
 
+# --- extract_parallel_multi_key ---------------------------------------------------
+
+
+class _RecordingProvider(AIProvider):
+    """Like _FixedResponseProvider, but also records every post id it
+    was asked to extract (parsed out of the prompt via the post's own
+    title, which build_extraction_prompt embeds verbatim) - lets a test
+    verify not just *how many* calls a provider got, but *which* posts
+    it actually received, without reaching into extract_parallel_multi_key's
+    own internals.
+    """
+
+    def __init__(self, response: str) -> None:
+        self.response = response
+        self.calls = 0
+        self.received_titles: List[str] = []
+
+    def check_connection(self) -> None:
+        return
+
+    def generate_text(self, prompt: str) -> str:
+        self.calls += 1
+        self.received_titles.append(prompt)
+        return self.response
+
+
+class _SlowResponseProvider(AIProvider):
+    """Like _FixedResponseProvider, but sleeps `delay` seconds before
+    each response - for test_parallel_faster_than_sequential, where
+    the whole point is measuring wall-clock time.
+    """
+
+    def __init__(self, response: str, delay: float) -> None:
+        self.response = response
+        self.delay = delay
+        self.calls = 0
+
+    def check_connection(self) -> None:
+        return
+
+    def generate_text(self, prompt: str) -> str:
+        self.calls += 1
+        time.sleep(self.delay)
+        return self.response
+
+
+def _make_titled_posts(n: int) -> List[FetchedPost]:
+    """Like _make_posts, but each post gets a distinct, identifiable
+    title ("item-0", "item-1", ...) baked into the prompt - lets
+    _RecordingProvider's captured prompts be matched back to a specific
+    post index for the round-robin distribution assertion. Deliberately
+    a different marker text ("item-N") than the post id/url ("post-N")
+    below, so parsing the title back out of the prompt can't accidentally
+    match the url's own "post-N" substring instead.
+    """
+    posts = []
+    for i in range(n):
+        posts.append(
+            FetchedPost(
+                source="mock",
+                item_type="post",
+                id=f"post-{i}",
+                title=f"item-{i}",
+                text=_SOURCE_TEXT,
+                author="someone",
+                url=f"mock://sample/post-{i}",
+                created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                is_mock=True,
+            )
+        )
+    return posts
+
+
+def test_parallel_extraction_distributes():
+    providers = [_RecordingProvider(json.dumps(_valid_data())) for _ in range(3)]
+    posts = _make_titled_posts(9)
+
+    insights = Extractor(providers[0]).extract_parallel_multi_key(posts, providers)
+
+    assert len(insights) == 9
+    assert [p.calls for p in providers] == [3, 3, 3]
+    # Round-robin: post i goes to provider i % 3 - item-0/3/6 to
+    # provider 0, item-1/4/7 to provider 1, item-2/5/8 to provider 2.
+    # Anchored on the literal "Discussion title: item-" prefix
+    # (build_extraction_prompt's own format), not a bare "item-" split -
+    # each post's url also independently contains "post-N", so a looser
+    # match risks picking up the wrong substring.
+    anchor = "Discussion title: item-"
+    for key_idx, provider in enumerate(providers):
+        received_indices = sorted(
+            int(prompt.split(anchor, 1)[1].split("\n", 1)[0]) for prompt in provider.received_titles if anchor in prompt
+        )
+        assert received_indices == [key_idx, key_idx + 3, key_idx + 6]
+
+
+def test_parallel_faster_than_sequential():
+    providers = [_SlowResponseProvider(json.dumps(_valid_data()), delay=0.1) for _ in range(3)]
+    posts = _make_posts(9)  # 3 per provider
+
+    start = time.time()
+    insights = Extractor(providers[0]).extract_parallel_multi_key(posts, providers)
+    elapsed = time.time() - start
+
+    assert len(insights) == 9
+    assert elapsed < 0.5  # 3 providers x 3 sequential calls each (0.3s) run concurrently
+    # Sequential baseline (a single provider handling all 9 one at a
+    # time) would be ~0.9s - not run for real here (would slow the
+    # suite down for no extra signal), but the arithmetic is what
+    # motivates the < 0.5s threshold above.
+
+
+def test_single_key_fallback():
+    provider = _FixedResponseProvider(json.dumps(_valid_data()))
+    posts = _make_posts(6)
+
+    insights = Extractor(provider).extract_parallel_multi_key(posts, [provider])  # must not raise
+
+    assert len(insights) == 6
+    assert provider.calls == 6
+
+
+def test_failed_extraction_skipped():
+    failing = _ErrorProvider()
+    working = [_FixedResponseProvider(json.dumps(_valid_data())) for _ in range(2)]
+    providers = [failing, *working]
+    posts = _make_posts(9)  # 3 per provider - failing's 3 must all come back as skipped
+
+    insights = Extractor(providers[0]).extract_parallel_multi_key(posts, providers)  # must not raise
+
+    assert len(insights) == 6  # 9 total - 3 that failing's provider couldn't extract
+    assert failing.calls == 3
+    assert working[0].calls == 3
+    assert working[1].calls == 3
+
+
 def test_extract_delay_between_batches(monkeypatch):
     # Overrides tests/conftest.py's autouse BATCH_DELAY=0 (which exists
     # so the rest of the suite doesn't pay a real 1.5s per batch) with a

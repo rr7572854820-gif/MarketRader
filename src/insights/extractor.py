@@ -21,7 +21,7 @@ import json
 import logging
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional
 
 from src.ai import AIProvider, AIProviderError
@@ -66,8 +66,17 @@ class Extractor:
     def __init__(self, ai_provider: AIProvider) -> None:
         self._ai_provider = ai_provider
 
-    def extract(self, post: FetchedPost) -> DiscussionInsight:
+    def extract(self, post: FetchedPost, ai_provider: Optional[AIProvider] = None) -> DiscussionInsight:
         """Analyze one post and return a validated DiscussionInsight.
+
+        ai_provider overrides self._ai_provider for this one call only,
+        when given - never mutates self. This is what makes
+        extract_parallel_multi_key() safe to call from several worker
+        threads sharing one Extractor instance at once: each thread
+        passes its own provider explicitly instead of any thread
+        writing to shared self state (which every other thread would
+        also be reading/writing at the same time - see that method's
+        own docstring for the real race this avoids).
 
         Raises:
             InsightExtractionError: If the AI call fails (after the
@@ -77,13 +86,14 @@ class Extractor:
                 evidence quote can't be verified against the post's
                 own text.
         """
+        provider = ai_provider if ai_provider is not None else self._ai_provider
         source_text = _combined_source_text(post)
         prompt = build_extraction_prompt(post.title or "", post.text, post.url)
 
         last_error: Optional[Exception] = None
         for _ in range(_MAX_ATTEMPTS):
             try:
-                raw_response = self._ai_provider.generate_text(prompt)
+                raw_response = provider.generate_text(prompt)
             except AIProviderError as exc:
                 raise InsightExtractionError(f"AI provider call failed: {exc}") from exc
 
@@ -99,16 +109,20 @@ class Extractor:
         )
 
     def _extract_single_safe(
-        self, post: FetchedPost, on_error: Optional[OnErrorCallback] = None
+        self,
+        post: FetchedPost,
+        on_error: Optional[OnErrorCallback] = None,
+        ai_provider: Optional[AIProvider] = None,
     ) -> Optional[DiscussionInsight]:
         """extract() for one post, but never raises - returns None on
         failure instead, after logging a warning and (if given) telling
         on_error the specific post/exception, so a caller batching many
         of these through a thread pool doesn't need its own per-item
-        try/except around each future.
+        try/except around each future. ai_provider is forwarded to
+        extract() unchanged - see that method's own docstring.
         """
         try:
-            return self.extract(post)
+            return self.extract(post, ai_provider=ai_provider)
         except InsightExtractionError as exc:
             logger.warning("Extraction failed for %s: %s", post.url, exc)
             if on_error:
@@ -175,6 +189,116 @@ class Extractor:
                 time.sleep(self.BATCH_DELAY)
 
         return all_insights
+
+    def _extract_single_with_provider(
+        self,
+        post: FetchedPost,
+        provider: AIProvider,
+        on_error: Optional[OnErrorCallback] = None,
+    ) -> Optional[DiscussionInsight]:
+        """extract() against a specific provider rather than
+        self._ai_provider - the thread-safe way to do that is passing
+        the provider explicitly (see extract()'s own ai_provider
+        parameter), never mutating shared self state from a worker
+        thread.
+
+        Broad except Exception, deliberately: this runs inside a
+        ThreadPoolExecutor worker as part of
+        extract_parallel_multi_key()'s per-key fan-out, and one item's
+        unexpected failure must never crash that key's whole batch or
+        the other keys running concurrently - same precedent as
+        BaseFetcher.fetch_parallel's own safe_fetch wrapper and
+        Pipeline._fetch_from_source (ENGINEERING_GUIDE.md's "exactly
+        one broad except Exception" claim was already stale before
+        this, per those two - see SESSION.md). _extract_single_safe's
+        own narrower `except InsightExtractionError` already handles
+        the expected failure case with its own logging; this is a
+        last-resort net around it, not a replacement for it.
+        """
+        try:
+            return self._extract_single_safe(post, on_error, ai_provider=provider)
+        except Exception as exc:  # noqa: BLE001 — per-item isolation at a parallel fan-out boundary, see docstring
+            logger.warning("Extraction failed for %s: %s", post.url, exc)
+            if on_error:
+                on_error(post, exc)
+            return None
+
+    def extract_parallel_multi_key(
+        self,
+        posts: List[FetchedPost],
+        ai_providers: List[AIProvider],
+        on_error: Optional[OnErrorCallback] = None,
+        on_batch_complete: Optional[OnBatchCompleteCallback] = None,
+    ) -> List[DiscussionInsight]:
+        """Distributes posts round-robin across several independent
+        AIProvider instances (typically one GroqProvider per configured
+        key - see GroqProvider.get_all_key_providers()) and extracts
+        each provider's share concurrently, one worker thread per
+        provider - so N providers means N requests that can genuinely
+        be in flight at once, each against its own key's independent
+        rate-limit budget, instead of N requests all competing for one
+        key's budget.
+
+        Falls back to extract_all_parallel() (this class's existing,
+        already-tested batched-single-provider path) whenever fewer
+        than 2 providers are given - one provider can't be usefully
+        distributed across, and spinning up the round-robin machinery
+        for a single key would just reproduce extract_all_parallel()'s
+        own behavior with more code, not less.
+
+        on_error/on_batch_complete have the same contract as
+        extract_all_parallel()'s own (a caller - Pipeline - relies on
+        both: on_error populates the errors list surfaced in the
+        dashboard's "Show details" disclosure, on_batch_complete drives
+        the SSE progress percentage during the analyze stage). A
+        "batch" here means one provider's entire assigned share (there
+        are exactly len(ai_providers) of them, each running in its own
+        thread) rather than a fixed BATCH_SIZE-sized chunk, since
+        there's no equivalent fixed chunk size once every provider is
+        its own independent worker. Uses as_completed() rather than
+        executor.map() specifically so on_batch_complete fires as each
+        provider's share actually finishes (real incremental progress),
+        not only after every provider - including the slowest - is
+        done, which executor.map() would otherwise force.
+        """
+        if len(ai_providers) < 2:
+            return self.extract_all_parallel(posts, on_error=on_error, on_batch_complete=on_batch_complete)
+
+        if not posts:
+            return []
+
+        n_keys = len(ai_providers)
+        total = len(posts)
+        results: List[Optional[DiscussionInsight]] = [None] * total
+
+        key_posts: List[List[FetchedPost]] = [[] for _ in range(n_keys)]
+        key_indices: List[List[int]] = [[] for _ in range(n_keys)]
+        for i, post in enumerate(posts):
+            key_idx = i % n_keys
+            key_posts[key_idx].append(post)
+            key_indices[key_idx].append(i)
+
+        def extract_key_batch(provider: AIProvider, batch: List[FetchedPost]) -> List[Optional[DiscussionInsight]]:
+            return [self._extract_single_with_provider(post, provider, on_error) for post in batch]
+
+        processed = 0
+        with ThreadPoolExecutor(max_workers=n_keys) as executor:
+            future_to_key = {
+                executor.submit(extract_key_batch, ai_providers[i], key_posts[i]): i
+                for i in range(n_keys)
+                if key_posts[i]
+            }
+            for future in as_completed(future_to_key):
+                key_idx = future_to_key[future]
+                batch_results = future.result()
+                for idx, result in zip(key_indices[key_idx], batch_results):
+                    results[idx] = result
+                processed += len(batch_results)
+                logger.info("Extracted %d/%d (multi-key)", processed, total)
+                if on_batch_complete:
+                    on_batch_complete(processed, total)
+
+        return [r for r in results if r is not None]
 
 
 def _combined_source_text(post: FetchedPost) -> str:

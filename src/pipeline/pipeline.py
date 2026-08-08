@@ -415,6 +415,46 @@ class Pipeline:
                 caching_provider = CachingAIProvider(counting_provider, cache)
                 active_provider = caching_provider
 
+            # Multi-key parallel extraction (Groq only) - see
+            # src/ai/groq_provider.py's get_all_key_providers() and
+            # Extractor.extract_parallel_multi_key(). Checked against
+            # the UNWRAPPED `ai_provider`, never `active_provider` -
+            # _CountingAIProvider/CachingAIProvider are plain decorators
+            # that don't expose get_all_key_providers, so checking the
+            # wrapped object would always be false even with 3 real
+            # Groq keys configured (confirmed by reading this file's
+            # own existing wrapping order before writing this).
+            #
+            # Each raw per-key provider gets its own fresh
+            # _CountingAIProvider/CachingAIProvider pair (sharing this
+            # run's one ResponseCache, so a hit via one key's provider
+            # still avoids a duplicate real call via another) rather
+            # than reusing counting_provider/caching_provider above -
+            # those classes' call_count/hits/misses are per-instance,
+            # not shared across concurrently-used instances, and making
+            # them shareable would mean editing src/pipeline/cache.py
+            # too, outside this task's stated boundary. Summed into
+            # ai_calls_made/cache_hits/cache_misses below instead - see
+            # run()'s summary construction.
+            extraction_counting_providers: List[_CountingAIProvider] = []
+            extraction_caching_providers: List[CachingAIProvider] = []
+            extract_providers: List[AIProvider] = [active_provider]
+            get_all_key_providers = getattr(ai_provider, "get_all_key_providers", None)
+            if get_all_key_providers is not None:
+                raw_key_providers = get_all_key_providers()
+                if len(raw_key_providers) > 1:
+                    logger.info("Using %d Groq keys in parallel for extraction", len(raw_key_providers))
+                    extract_providers = []
+                    for raw in raw_key_providers:
+                        key_counting = _CountingAIProvider(raw)
+                        extraction_counting_providers.append(key_counting)
+                        if self._config.cache_enabled:
+                            key_caching = CachingAIProvider(key_counting, cache)
+                            extraction_caching_providers.append(key_caching)
+                            extract_providers.append(key_caching)
+                        else:
+                            extract_providers.append(key_counting)
+
             # Natural-language query expansion (GitHub and "all" runs,
             # since "all" includes GitHub - see _MULTI_SOURCE_EXPANSION):
             # a user's free-text description ("problems with invoice
@@ -497,7 +537,7 @@ class Pipeline:
             self._emit(on_progress, "fetch", f"✅ Fetched {len(posts)} real discussions", 35)
 
             extract_start = time.time()
-            insights = self._analyze(posts, active_provider, errors, on_progress)
+            insights = self._analyze(posts, extract_providers, errors, on_progress)
             extract_time = time.time() - extract_start
             logger.info("⏱ Extract: %.1fs", extract_time)
 
@@ -519,19 +559,27 @@ class Pipeline:
                 if is_multi_source:
                     posts, insights, clusters = self._oversample_for_report_count_multi(
                         app_config, active_sources, community, search_keyword, expanded_terms, posts,
-                        len(clusters), active_provider, errors,
+                        len(clusters), active_provider, extract_providers, errors,
                     )
                 else:
                     assert fetcher is not None  # set above whenever not is_multi_source
                     posts, insights, clusters = self._oversample_for_report_count(
-                        fetcher, community, search_keyword, expanded_terms, posts, len(clusters), active_provider, errors
+                        fetcher, community, search_keyword, expanded_terms, posts, len(clusters),
+                        active_provider, extract_providers, errors,
                     )
 
             verification_report = self._verify(insights, posts, on_progress)
-            ai_calls_made = counting_provider.call_count
+            # Summed across the single active_provider path AND every
+            # per-key provider extract_providers may have used (see
+            # this method's own multi-key setup above) - query
+            # expansion/clustering always go through active_provider
+            # alone (never parallelized across keys), while extraction
+            # alone may have used either, so both must be counted for
+            # ai_calls_made/cache_hits/cache_misses to stay accurate.
+            ai_calls_made = counting_provider.call_count + sum(p.call_count for p in extraction_counting_providers)
             if caching_provider is not None:
-                cache_hits = caching_provider.hits
-                cache_misses = caching_provider.misses
+                cache_hits = caching_provider.hits + sum(p.hits for p in extraction_caching_providers)
+                cache_misses = caching_provider.misses + sum(p.misses for p in extraction_caching_providers)
 
             self._emit(on_progress, "report", "📝 Generating final report...", 95)
             insight_report = generate_report(clusters, verification_report, posts, ai_provider_label)
@@ -759,6 +807,7 @@ class Pipeline:
         posts: List[FetchedPost],
         clusters_so_far: int,
         active_provider: AIProvider,
+        extract_providers: List[AIProvider],
         errors: List[str],
     ) -> Tuple[List[FetchedPost], List[DiscussionInsight], List[OpportunityCluster]]:
         """One additional fetch round (this method has exactly one call
@@ -769,6 +818,14 @@ class Pipeline:
         insights/clusters, and no more costly in practice since
         CachingAIProvider (when enabled) makes re-extracting an
         already-seen post a cache hit rather than a real API call.
+
+        active_provider (single) drives clustering, unchanged;
+        extract_providers (one or several, for multi-key Groq - see
+        run()'s own setup) drives this round's re-extraction via
+        _analyze() - kept as two separate parameters rather than
+        deriving one from the other, since which provider(s) handle
+        extraction vs. clustering are genuinely different decisions
+        (only extraction is ever parallelized across keys).
 
         search_keyword/expanded_terms are the already-expanded GitHub
         search term(s) (see run()'s own QueryExpander.expand() call) -
@@ -793,7 +850,7 @@ class Pipeline:
         )
         more_posts = self._fetch(fetcher, query, errors)
         merged_posts = _merge_posts(posts, more_posts)
-        insights = self._analyze(merged_posts, active_provider, errors)
+        insights = self._analyze(merged_posts, extract_providers, errors)
         clusters = self._cluster(insights, active_provider, errors)
         if len(clusters) < self._config.num_reports:
             logger.info(
@@ -816,15 +873,18 @@ class Pipeline:
         posts: List[FetchedPost],
         clusters_so_far: int,
         active_provider: AIProvider,
+        extract_providers: List[AIProvider],
         errors: List[str],
     ) -> Tuple[List[FetchedPost], List[DiscussionInsight], List[OpportunityCluster]]:
         """The source="all" equivalent of _oversample_for_report_count()
         - same one-more-round, re-analyze-from-scratch-over-the-merged-
-        set shape (see that method's own docstring); a separate method
-        rather than a shared one because there's no single `fetcher` to
-        reuse here - every active source is fetched again via
-        _fetch_all_sources(), each getting its own even split of
-        post_limit (see _split_limit), exactly like the initial fetch.
+        set shape (see that method's own docstring, including why
+        active_provider/extract_providers are kept as two separate
+        parameters); a separate method rather than a shared one because
+        there's no single `fetcher` to reuse here - every active source
+        is fetched again via _fetch_all_sources(), each getting its own
+        even split of post_limit (see _split_limit), exactly like the
+        initial fetch.
         """
         logger.info(
             "Only %d/%d requested report(s) found from %d discussion(s); fetching more from %s (up to the "
@@ -844,7 +904,7 @@ class Pipeline:
         )
         more_posts = self._fetch_all_sources(app_config, active_sources, query, errors)
         merged_posts = _merge_posts(posts, more_posts)
-        insights = self._analyze(merged_posts, active_provider, errors)
+        insights = self._analyze(merged_posts, extract_providers, errors)
         clusters = self._cluster(insights, active_provider, errors)
         if len(clusters) < self._config.num_reports:
             logger.info(
@@ -872,22 +932,28 @@ class Pipeline:
     def _analyze(
         self,
         posts: List[FetchedPost],
-        ai_provider: AIProvider,
+        ai_providers: List[AIProvider],
         errors: List[str],
         on_progress: Optional[ProgressCallback] = None,
     ) -> List[DiscussionInsight]:
-        """Extracts every post in parallel batches - see
-        Extractor.extract_all_parallel(). Progress is reported per
-        batch, not per post: real parallel completion order can't
-        preserve the old sequential loop's guarantee that percent only
-        ever increases (see extract_all_parallel's own docstring) -
-        per-batch events stay monotonic (always emitted from this
-        thread, after a whole batch finishes, in batch order) without
-        that risk, at the cost of coarser granularity during this stage.
+        """Extracts every post - see Extractor.extract_parallel_multi_key(),
+        which distributes work across every provider in ai_providers
+        (one worker thread per provider) when there's more than one
+        (multi-key Groq - see run()'s own extract_providers setup), and
+        transparently falls back to the existing extract_all_parallel()
+        batched-single-provider path otherwise - callers here never
+        need to choose between the two themselves.
+
+        Progress is reported per provider's share, not per post: real
+        parallel completion order can't preserve a strictly sequential
+        loop's guarantee that percent only ever increases - per-batch
+        events stay monotonic (always emitted from this thread, only
+        after a whole share finishes) without that risk, at the cost of
+        coarser granularity during this stage.
         """
         if not posts:
             return []
-        extractor = Extractor(ai_provider)
+        extractor = Extractor(ai_providers[0])
         total = len(posts)
 
         def on_error(post: FetchedPost, exc: Exception) -> None:
@@ -902,7 +968,9 @@ class Pipeline:
                 on_progress, "analyze", f"🤖 Analyzed {done}/{total_count} discussions...", 40 + round(25 * done / total_count)
             )
 
-        insights = extractor.extract_all_parallel(posts, on_error=on_error, on_batch_complete=on_batch_complete)
+        insights = extractor.extract_parallel_multi_key(
+            posts, ai_providers, on_error=on_error, on_batch_complete=on_batch_complete
+        )
         logger.info("Analyzed %d of %d post(s).", len(insights), len(posts))
         return insights
 

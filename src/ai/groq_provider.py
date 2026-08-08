@@ -103,6 +103,45 @@ class GroqProvider(AIProvider):
         self.current_key_index = 0
         self._init_client()
 
+    @classmethod
+    def from_single_key(cls, api_key: str) -> "GroqProvider":
+        """Constructs a GroqProvider bound to exactly one raw key
+        string, bypassing the normal Config-based __init__ (which reads
+        every configured key from config.groq_api_keys/groq_api_key).
+
+        Used by get_provider_for_key()/get_all_key_providers() to hand
+        out one independent, single-key provider per configured key,
+        for true parallel extraction - each has its own Groq client
+        (see _init_client()), so concurrent generate_text() calls
+        across several of these never share one key's rate-limit
+        budget. A real constructor (cls.__new__ + explicit field
+        setup, same idea as this class's own __init__) rather than
+        cloning an existing instance's __dict__, so this stays in sync
+        automatically if __init__'s own construction logic ever grows
+        - a clone would need that duplicated by hand in a second place.
+        """
+        provider = cls.__new__(cls)
+        provider.api_keys = [api_key]
+        provider.current_key_index = 0
+        provider._init_client()
+        return provider
+
+    def get_provider_for_key(self, key_index: int) -> "GroqProvider":
+        """Returns a new GroqProvider bound to exactly one of this
+        provider's already-configured keys (self.api_keys[key_index]) -
+        see from_single_key().
+        """
+        return GroqProvider.from_single_key(self.api_keys[key_index])
+
+    def get_all_key_providers(self) -> List["GroqProvider"]:
+        """One single-key GroqProvider per configured key - lets a
+        caller (Extractor.extract_parallel_multi_key) distribute work
+        across them so each concurrent generate_text() call hits a
+        different key's own, independent rate-limit budget instead of
+        this provider's one currently-active key.
+        """
+        return [self.get_provider_for_key(i) for i in range(len(self.api_keys))]
+
     def _init_client(self) -> None:
         """(Re)builds self.client for the currently-active key - called
         once from __init__ and again from _rotate_key() each time the
